@@ -1,3 +1,0 @@
-
-obj-y               += sdinfo.o
-

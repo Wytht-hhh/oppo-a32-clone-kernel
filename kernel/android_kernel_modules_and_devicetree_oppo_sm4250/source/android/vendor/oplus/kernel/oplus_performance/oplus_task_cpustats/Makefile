@@ -1,3 +1,0 @@
-#ifdef OPLUS_FEATURE_TASK_CPUSTATS
-obj-$(CONFIG_OPLUS_CTP) += task_cpustats.o
-#endif /* OPLUS_FEATURE_TASK_CPUSTATS */
