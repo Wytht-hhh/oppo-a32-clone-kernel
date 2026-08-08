@@ -1,0 +1,7 @@
+toolchain/
+*.dtb
+*.ko
+*.o
+*.elf
+*.img
+out/
