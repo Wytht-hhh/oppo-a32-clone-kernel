@@ -1,3 +1,4 @@
+[中文文档](README.zh.md) | English
 # OPPO A32 (SM4250 / bengal) Kernel Build Environment Package
 
 This package is **self-contained**: extract it on any x86_64 Linux machine, and you can build the kernel directly – **no external dependencies** on host paths. No need to download toolchains (clang + GCC binutils) online; they are already bundled in `toolchain/`.
