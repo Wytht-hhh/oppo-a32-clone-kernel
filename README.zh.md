@@ -1,6 +1,7 @@
 中文 | [English](README.md)
 # OPPO A32 (SM4250 / bengal) 内核构建环境包
 非常感谢 rtyutechstudio(cuoxianxu) 参与测试以及提供了巨大帮助
+
 本包是**自包含**的：解压到任意 x86_64 Linux 机器即可直接编译，不依赖任何本机路径。
 不需要联网下载工具链（clang + GCC binutils 已打包在 `toolchain/`）。
 
