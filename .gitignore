@@ -1,4 +1,3 @@
-toolchain/
 *.dtb
 *.ko
 *.o
