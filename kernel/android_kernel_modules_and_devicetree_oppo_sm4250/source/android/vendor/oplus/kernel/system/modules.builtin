@@ -1,0 +1,9 @@
+kernel/drivers/soc/oplus/system/oplus_project/gki/oplus_project.ko
+kernel/drivers/soc/oplus/system/oppo_pmic_monitor/pmic_monitor.ko
+kernel/drivers/soc/oplus/system/oppo_saupwk/oppo_saupwk.ko
+kernel/drivers/soc/oplus/system/project_info/boot_mode.ko
+kernel/drivers/soc/oplus/system/qcom_pmicwd/oplus_pmicwd.ko
+kernel/drivers/soc/oplus/system/qcom_watchdog/qcom_enhance_watchdog.ko
+kernel/drivers/soc/oplus/system/shutdown_detect/shutdown_detect.ko
+kernel/drivers/soc/oplus/system/theia/bscheck.ko
+kernel/drivers/soc/oplus/system/theia/brightscreen_check.ko
