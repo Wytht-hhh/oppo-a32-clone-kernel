@@ -10,7 +10,7 @@ on:
         type: choice
         options:
           - kernel_only       # 仅编译内核
-          - boot_only         # 仅构建 Boot 镜像（需要先跑过 kernel_only）
+          - boot_only         # 仅构建 Boot 镜像（需预置内核文件）
           - kernel_and_boot   # 编译内核 + 构建 Boot
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # ================== 2. 安装依赖（修复 libtinfo5） ==================
+    # ================== 2. 安装依赖 ==================
     - name: Install Dependencies
       run: |
         sudo apt-get update
@@ -38,17 +38,20 @@ jobs:
         chmod +x build_kernel.sh
         ./build_kernel.sh
         
-        echo "====== 🔍 检查 Droidspaces 关键内核配置 ======"
-        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_OVERLAY_FS|CONFIG_SECCOMP" .config || echo "⚠️ 未找到 Droidspaces 配置，建议手动检查！"
+        echo "====== 🔍 检查 Droidspaces 关键配置 ======"
+        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_OVERLAY_FS" .config || echo "⚠️ 未找到关键配置，请手动检查！"
         
-        echo "====== 📁 搜索编译出的内核文件 ======"
-        find . -name "Image*" -type f
+        echo "====== 📁 正在全盘搜索生成的内核文件 ======"
+        find . -name "Image*" -type f 2>/dev/null
         
-        mkdir -p ~/compiled_kernel
-        cp $(find . -name "Image.gz-dtb" -type f | head -n 1) ~/compiled_kernel/ 2>/dev/null || \
-        cp $(find . -name "Image.gz" -type f | head -n 1) ~/compiled_kernel/ 2>/dev/null || \
-        cp $(find . -name "Image" -type f | head -n 1) ~/compiled_kernel/ 2>/dev/null
-        ls -lh ~/compiled_kernel/
+        mkdir -p ~/collected_kernel
+        # 依次尝试寻找标准命名，确保一定会捕获到内核文件
+        cp $(find . -name "Image.gz-dtb" -type f | head -n 1) ~/collected_kernel/ 2>/dev/null || \
+        cp $(find . -name "Image.gz" -type f | head -n 1) ~/collected_kernel/ 2>/dev/null || \
+        cp $(find . -name "Image" -type f | head -n 1) ~/collected_kernel/ 2>/dev/null
+        
+        echo "====== 📦 成功收集到的内核文件 ======"
+        ls -lh ~/collected_kernel/
 
     # ================== 4. 上传编译好的内核（仅 kernel_only 时） ==================
     - name: Upload Kernel Image
@@ -56,30 +59,42 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: kernel-image
-        path: ~/compiled_kernel/*
+        path: ~/collected_kernel/*
 
     # ================== 5. 构建 Boot 镜像（当选择 boot_only 或 kernel_and_boot 时） ==================
     - name: Pack Boot Image
       if: inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot'
       run: |
+        # 检查原厂 boot.img 是否存在
+        if [ ! -f "factory_boot/boot.img" ]; then
+          echo "❌ 错误：未找到 factory_boot/boot.img，请先上传纯净原厂镜像！"
+          exit 1
+        fi
+        
         # 下载 AIK 打包工具
         git clone https://github.com/BuildVoid/AIK-Linux-mirror.git aik
         cd aik
         
-        # 复制原厂 boot.img（必须上传到仓库的 factory_boot 文件夹里）
+        # 解包原厂 boot.img
         cp ../factory_boot/boot.img ./
-        
-        # 解包 boot.img
         ./unpackimg.sh boot.img
         
         # 替换内核
-        # 如果是 kernel_and_boot，用刚编译好的；如果是 boot_only，用之前下载好的内核（需手动放到指定目录）
         if [ "${{ inputs.build_type }}" == "kernel_and_boot" ]; then
-          cp ~/compiled_kernel/* ./split_img/boot.img-kernel
-        else
-          # boot_only 模式下，需要你提前把内核文件放在仓库的 factory_boot/ 目录下，或者用其他方式提供
-          echo "⚠️ boot_only 模式下需要你预先提供内核文件，暂不支持自动处理。"
-          exit 1
+          # 使用刚刚编译出来的内核
+          cp ~/collected_kernel/* ./split_img/boot.img-kernel
+        elif [ "${{ inputs.build_type }}" == "boot_only" ]; then
+          # 使用预先存放在 factory_boot/ 目录下的内核文件
+          if [ -f "../factory_boot/Image.gz-dtb" ]; then
+            cp ../factory_boot/Image.gz-dtb ./split_img/boot.img-kernel
+          elif [ -f "../factory_boot/Image.gz" ]; then
+            cp ../factory_boot/Image.gz ./split_img/boot.img-kernel
+          elif [ -f "../factory_boot/Image" ]; then
+            cp ../factory_boot/Image ./split_img/boot.img-kernel
+          else
+            echo "❌ 错误：boot_only 模式下，请把内核文件（如 Image.gz-dtb）也放到 factory_boot/ 目录下！"
+            exit 1
+          fi
         fi
         
         # 重新打包
