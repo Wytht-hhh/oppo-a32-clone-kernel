@@ -1,6 +1,5 @@
 name: Build OPPO A32 Kernel
 
-# 添加手动触发选项
 on:
   workflow_dispatch:
     inputs:
@@ -23,52 +22,31 @@ jobs:
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler
-        # 创建缺失的固件目录，解决编译报错
+        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5
         sudo mkdir -p /lib/firmware
 
     - name: Build Kernel
       run: |
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        # 进入源码目录（根据你实际仓库结构，需确认路径是否正确）
-        # 如果报错找不到目录，把下面的路径改成实际的路径
-        cd kernel/android_kernel_modules_and_devicetree_oppo_sm4250/source/android/kernel/msm-4.19
-        
-        # 修正配置，避免 /lib/firmware 路径报错
-        scripts/config --set-str CONFIG_CFG80211_EXTRA_REGDB_KEYDIR ""
-        
-        # 返回根目录运行脚本
-        cd ../../../../../../
+        cp config/phone.config .config
         chmod +x build_kernel.sh
         ./build_kernel.sh
 
-    # 如果用户选择了 full_boot，才执行打包步骤
     - name: Pack Boot Image (Full Boot only)
       if: github.event.inputs.build_type == 'full_boot'
       run: |
-        # 1. 下载 AIK 打包工具
         git clone https://github.com/BuildVoid/AIK-Linux-mirror.git aik
-        
-        # 2. 进入 AIK 目录并解包原厂镜像
         cd aik
         cp ../factory_boot/boot.img ./
         ./unpackimg.sh boot.img
-        
-        # 3. 替换成新编译的内核（注意确认编译输出路径）
         cp ../out/arch/arm64/boot/Image.gz-dtb ./split_img/boot.img-kernel
-        
-        # 4. 重新打包
         ./repackimg.sh
-        
-        # 5. 把生成的新镜像移到仓库根目录并重命名
         mv image-new.img ../new-boot.img
 
-    # 上传产物：根据选择类型上传不同文件
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ${{ github.event.inputs.build_type == 'full_boot' && 'new-boot-image' || 'kernel-image' }}
-        # 如果是打包，上传 new-boot.img；如果是纯内核，上传编译出的内核文件
         path: |
           ${{ github.event.inputs.build_type == 'full_boot' && 'new-boot.img' || 'out/arch/arm64/boot/Image.gz-dtb' }}
