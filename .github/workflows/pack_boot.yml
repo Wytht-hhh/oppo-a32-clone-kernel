@@ -39,32 +39,35 @@ jobs:
     - name: 2. 安装基础工具
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget unzip gzip file
+        sudo apt-get install -y wget unzip gzip file python3
 
-    # ================== 3. 下载 AIK 压缩包并提取原生工具 ==================
+    # ================== 3. 下载并提取正确的 x86_64 工具 ==================
     - name: 3. 提取 unpackbootimg 和 mkbootimg
       run: |
         echo "====== 📦 下载 AIK 压缩包并提取打包工具 ======"
-        # 下载 ZIP 压缩包，避免 git clone 的凭据认证问题
-        wget -q "https://github.com/SebaUbuntu/AIK-Linux-mirror/archive/refs/heads/master.zip" -O aik_master.zip
+        # 直接下载 osm0sis 官方 AIK 的压缩包，里面包含 x86_64 架构的纯净工具
+        wget -q "https://github.com/osm0sis/AIK-Linux/archive/refs/heads/master.zip" -O aik_master.zip
         if [ ! -s aik_master.zip ]; then
           echo "❌ AIK 压缩包下载失败！"
           exit 1
         fi
         unzip -q aik_master.zip -d aik_temp
         
-        # 自动寻找包含 unpackbootimg 的目录
-        TOOL_DIR=$(find aik_temp -type f -name "unpackbootimg" -exec dirname {} \; | head -1)
-        if [ -z "$TOOL_DIR" ]; then
-          echo "❌ 在 AIK 压缩包中未找到 unpackbootimg！"
-          exit 1
-        fi
-        
-        cp "$TOOL_DIR/unpackbootimg" ./unpackbootimg
-        cp "$TOOL_DIR/mkbootimg" ./mkbootimg
+        # 从 AIK 的 bin 目录中提取工具
+        cp aik_temp/AIK-Linux-master/bin/unpackbootimg ./unpackbootimg
+        cp aik_temp/AIK-Linux-master/bin/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
         
-        echo "✅ 工具提取成功"
+        echo "====== 🔍 验证工具架构 ======"
+        file ./unpackbootimg
+        file ./mkbootimg
+        
+        # 关键检查：确保它是 x86-64 架构的 ELF 可执行文件
+        if ! file ./unpackbootimg | grep -q "ELF 64-bit LSB executable"; then
+          echo "❌ 错误：下载的 unpackbootimg 架构不对，无法在云端运行！"
+          exit 1
+        fi
+        echo "✅ 工具提取成功，架构验证通过"
 
     # ================== 4. 下载原厂 boot.img ==================
     - name: 4. 下载原厂 boot.img
@@ -136,7 +139,7 @@ jobs:
       run: |
         echo "====== 🔧 使用 unpackbootimg 解包原厂 boot.img ======"
         mkdir -p bootimg_out
-        # 直接调用当前目录下的工具，绝不会有 command not found
+        # 运行 x86_64 原生工具解包
         ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
 
         echo "====== 🔄 替换内核 ======"
@@ -163,14 +166,20 @@ jobs:
         OS_PATCH_LEVEL=$(cat boot.img-os_patch_level)
         HEADER_VERSION=$(cat boot.img-header_version)
 
+        # 自动识别 ramdisk 文件名（可能是 .gz 或未压缩）
+        RAMDISK_ARG=""
+        if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"
+        elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"
+        fi
+
         DTB_ARG=""
         if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
         SECOND_ARG=""
         if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
 
-        # 使用当前目录上一级的 mkbootimg
+        # 使用 x86_64 原生 mkbootimg 重新打包
         ../mkbootimg --kernel boot.img-kernel \
-                  --ramdisk boot.img-ramdisk.gz \
+                  $RAMDISK_ARG \
                   $SECOND_ARG \
                   $DTB_ARG \
                   --cmdline "$CMDLINE" \
