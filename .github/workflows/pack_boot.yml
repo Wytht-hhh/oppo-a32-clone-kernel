@@ -39,23 +39,23 @@ jobs:
     - name: 2. 安装基础工具
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget unzip gzip file python3
+        sudo apt-get install -y wget curl unzip gzip file
 
-    # ================== 3. 下载并提取正确的 x86_64 工具 ==================
-    - name: 3. 提取 unpackbootimg 和 mkbootimg
+    # ================== 3. 下载 unpackbootimg 和 mkbootimg ==================
+    - name: 3. 下载 unpackbootimg 和 mkbootimg
       run: |
-        echo "====== 📦 下载 AIK 压缩包并提取打包工具 ======"
-        # 直接下载 osm0sis 官方 AIK 的压缩包，里面包含 x86_64 架构的纯净工具
-        wget -q "https://github.com/osm0sis/AIK-Linux/archive/refs/heads/master.zip" -O aik_master.zip
-        if [ ! -s aik_master.zip ]; then
-          echo "❌ AIK 压缩包下载失败！"
-          exit 1
-        fi
-        unzip -q aik_master.zip -d aik_temp
+        echo "====== 📦 下载 unpackbootimg 和 mkbootimg ======"
+        # 优先使用 raw.githubusercontent.com 直接获取单个文件，比下载整个压缩包稳定得多
+        curl -L -s "https://raw.githubusercontent.com/osm0sis/AIK-Linux/master/bin/unpackbootimg" -o unpackbootimg
+        curl -L -s "https://raw.githubusercontent.com/osm0sis/AIK-Linux/master/bin/mkbootimg" -o mkbootimg
         
-        # 从 AIK 的 bin 目录中提取工具
-        cp aik_temp/AIK-Linux-master/bin/unpackbootimg ./unpackbootimg
-        cp aik_temp/AIK-Linux-master/bin/mkbootimg ./mkbootimg
+        # 备用源：如果主源失败，从 SebaUbuntu 的镜像下载
+        if [ ! -s "unpackbootimg" ] || [ ! -s "mkbootimg" ]; then
+          echo "⚠️ 主源下载失败，尝试备用源..."
+          curl -L -s "https://raw.githubusercontent.com/SebaUbuntu/AIK-Linux-mirror/master/bin/unpackbootimg" -o unpackbootimg
+          curl -L -s "https://raw.githubusercontent.com/SebaUbuntu/AIK-Linux-mirror/master/bin/mkbootimg" -o mkbootimg
+        fi
+        
         chmod +x ./unpackbootimg ./mkbootimg
         
         echo "====== 🔍 验证工具架构 ======"
