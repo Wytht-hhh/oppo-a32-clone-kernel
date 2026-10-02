@@ -39,24 +39,31 @@ jobs:
     - name: 2. 安装基础工具
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget unzip gzip file git
+        sudo apt-get install -y wget unzip gzip file
 
-    # ================== 3. 克隆 AIK 仓库并提取原生工具 ==================
+    # ================== 3. 下载 AIK 压缩包并提取原生工具 ==================
     - name: 3. 提取 unpackbootimg 和 mkbootimg
       run: |
-        echo "====== 📦 克隆 AIK 仓库并提取打包工具 ======"
-        # 直接克隆 osm0sis 的 AIK 仓库，这是最稳定、最纯净的源头
-        git clone --depth=1 https://github.com/osm0sis/AIK-Linux.git aikl
-        
-        # 从仓库的 bin 目录中提取出两个原生 Linux 工具
-        cp aikl/bin/unpackbootimg ./unpackbootimg
-        cp aikl/bin/mkbootimg ./mkbootimg
-        chmod +x ./unpackbootimg ./mkbootimg
-        
-        if [ ! -f "./unpackbootimg" ] || [ ! -f "./mkbootimg" ]; then
-          echo "❌ 工具提取失败！"
+        echo "====== 📦 下载 AIK 压缩包并提取打包工具 ======"
+        # 下载 ZIP 压缩包，避免 git clone 的凭据认证问题
+        wget -q "https://github.com/SebaUbuntu/AIK-Linux-mirror/archive/refs/heads/master.zip" -O aik_master.zip
+        if [ ! -s aik_master.zip ]; then
+          echo "❌ AIK 压缩包下载失败！"
           exit 1
         fi
+        unzip -q aik_master.zip -d aik_temp
+        
+        # 自动寻找包含 unpackbootimg 的目录
+        TOOL_DIR=$(find aik_temp -type f -name "unpackbootimg" -exec dirname {} \; | head -1)
+        if [ -z "$TOOL_DIR" ]; then
+          echo "❌ 在 AIK 压缩包中未找到 unpackbootimg！"
+          exit 1
+        fi
+        
+        cp "$TOOL_DIR/unpackbootimg" ./unpackbootimg
+        cp "$TOOL_DIR/mkbootimg" ./mkbootimg
+        chmod +x ./unpackbootimg ./mkbootimg
+        
         echo "✅ 工具提取成功"
 
     # ================== 4. 下载原厂 boot.img ==================
