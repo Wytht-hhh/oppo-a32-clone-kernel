@@ -77,6 +77,8 @@ jobs:
     - name: 4. 修复源码 Bug (C11/C12 兼容性补丁)
       run: |
         echo "====== 🔧 应用源码兼容性补丁 ======"
+        
+        # 1. 进入内核源码目录，修补源码文件
         cd ${{ env.KERNEL_SOURCE_DIR }}
 
         # ============================================================
@@ -100,12 +102,15 @@ jobs:
             echo "✅ 已在 Makefile 中禁用 uifirst 编译"
         fi
 
-        # 同时在 config 配置层面彻底关闭这个功能，双保险
-        sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' ../../../config/phone.config
-        echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> ../../../config/phone.config
-        echo "✅ 已在配置文件中禁用 UIFIRST"
-
+        # ============================================================
+        # 2. 关键修复：打完源码补丁后，切回仓库根目录，修改 config 文件
+        # 原因：源码目录层级太深，直接相对路径会找不到根目录的 config 文件夹
+        # ============================================================
         cd ${{ github.workspace }}
+        echo "====== 🔧 从根目录修改配置文件 ======"
+        sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' config/phone.config
+        echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> config/phone.config
+        echo "✅ 已在配置文件中禁用 UIFIRST"
 
     # ================== 5. 编译内核 ==================
     - name: 5. 编译内核
