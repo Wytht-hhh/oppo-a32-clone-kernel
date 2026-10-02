@@ -38,7 +38,7 @@ jobs:
     - name: 2. 安装编译依赖
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip
+        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget
         sudo mkdir -p /lib/firmware
 
     # ================== 3. 编译内核 ==================
@@ -75,7 +75,7 @@ jobs:
         
         # 如果选择了 KernelSU，在编译前集成
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
-          echo "====== 🔧 集成 KernelSU v0.9.5 到内核源码 ======"
+          echo "====== 🔧 集成 KernelSU 到内核源码 ======"
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
           echo "CONFIG_KSU=y" >> config/phone.config
           echo "CONFIG_KSU_DEBUG=n" >> config/phone.config
@@ -89,7 +89,6 @@ jobs:
         echo "====== ✅ 验证 Droidspaces 相关配置 ======"
         grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_OVERLAY_FS|CONFIG_SECCOMP|CONFIG_PID_NS|CONFIG_NET_NS" .config
         
-        # 如果选择了 KernelSU，额外验证 KernelSU 配置
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           echo "====== ✅ 验证 KernelSU 配置 ======"
           if grep -q "CONFIG_KSU=y" .config; then
@@ -104,7 +103,7 @@ jobs:
         cp ./build/arch/arm64/boot/Image.gz ~/compiled_kernel/Image.gz
         ls -lh ~/compiled_kernel/
 
-    # ================== 4. 上传编译好的内核（仅 kernel_only 时） ==================
+    # ================== 4. 上传编译好的内核 ==================
     - name: 4. 上传编译好的内核
       if: inputs.build_type == 'kernel_only'
       uses: actions/upload-artifact@v4
@@ -126,19 +125,19 @@ jobs:
           unzip -q aik.zip -d aik_temp
           mv aik_temp/* aik 2>/dev/null || true
         fi
+        cd aik
+        chmod +x unpackimg.sh repackimg.sh cleanimg.sh
         
         echo "====== 🧐 下载原厂 boot.img ======"
         BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
-        wget -q "$BOOT_URL" -O boot.img
-        if [ ! -s boot.img ]; then
+        wget -q "$BOOT_URL" -O ../boot.img
+        if [ ! -s ../boot.img ]; then
           echo "❌ 原厂 boot.img 下载失败！停止打包。"
-          echo "====== 📁 已为您保留内核文件，可手动使用 AIK 打包 ======"
           exit 1
         fi
         
-        cd aik
         echo "====== 🔧 解包原厂 boot.img ======"
-        ./unpackimg.sh ../boot.img
+        ./unpackimg.sh ../boot.img || { echo "❌ 解包失败，请检查日志！"; exit 1; }
         
         echo "====== 🔄 替换内核 ======"
         if [ "${{ inputs.build_type }}" == "kernel_and_boot" ]; then
@@ -149,7 +148,7 @@ jobs:
         fi
         
         echo "====== 📦 重新打包生成 Boot 镜像 ======"
-        ./repackimg.sh
+        ./repackimg.sh || { echo "❌ 打包失败，请检查日志！"; exit 1; }
         mv image-new.img ../new-boot.img
         echo "✅ Boot 镜像打包成功！"
 
@@ -158,11 +157,12 @@ jobs:
       if: (inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot') && inputs.root_choice == 'magisk' && hashFiles('new-boot.img') != ''
       run: |
         echo "====== 📥 下载 Magisk APK ======"
-        MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v30.6/Magisk.apk"
+        MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Magisk.apk"
         wget -q "$MAGISK_URL" -O Magisk.apk
         if [ ! -s Magisk.apk ]; then
-          echo "⚠️ Release 中未找到 Magisk.apk，尝试在线下载..."
-          wget -q "https://github.com/topjohnwu/Magisk/releases/download/v30.6/Magisk-v30.6.apk" -O Magisk.apk
+          echo "⚠️ 用户 Release 中未找到，尝试从官方仓库下载最新版..."
+          LATEST_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
+          wget -q "$LATEST_URL" -O Magisk.apk
         fi
         
         if [ ! -s Magisk.apk ]; then
@@ -194,21 +194,17 @@ jobs:
           echo "⚠️ 未找到 boot_patch.sh，跳过自动修补。请手动用 Magisk App 修补。"
         fi
 
-    # ================== 7. 智能准备最终产物 ==================
-    - name: 7. 智能准备最终产物
+    # ================== 7. 准备最终产物 ==================
+    - name: 7. 准备最终产物
       if: always() && (inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot')
       run: |
-        # 根据 Root 方案，决定 ZIP 的名字和内部结构
         ROOT_CHOICE="${{ inputs.root_choice }}"
         if [ "$ROOT_CHOICE" == "magisk" ]; then
           KIT_NAME="A32-Linux-Kit-Magisk"
-          APK_NAME="Magisk.apk"
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
           KIT_NAME="A32-Linux-Kit-KernelSU"
-          APK_NAME="KernelSU.apk"
         else
           KIT_NAME="A32-Linux-Kit-NoRoot"
-          APK_NAME=""
         fi
         
         echo "====== 📦 构建最终产物: $KIT_NAME.zip ======"
@@ -216,61 +212,124 @@ jobs:
         mkdir -p ~/final_release/kernel
         mkdir -p ~/final_release/apk
         
-        # 1. 放入内核（不管打包、修补是否成功，只要有就放）
+        # 1. 放入内核
         if [ -f ~/compiled_kernel/Image.gz ]; then
           cp ~/compiled_kernel/Image.gz ~/final_release/kernel/Image.gz
-          echo "✅ 已包含内核: kernel/Image.gz"
         fi
         
         # 2. 放入未修补的 boot 镜像
         if [ -f new-boot.img ]; then
           cp new-boot.img ~/final_release/boot/boot-unpatched.img
-          echo "✅ 已包含未修补镜像: boot/boot-unpatched.img"
         fi
         
-        # 3. 放入 Magisk 修补后的镜像（仅当修补成功）
+        # 3. 放入 Magisk 修补后的镜像
         if [ -f new-boot-magisk-patched.img ]; then
           cp new-boot-magisk-patched.img ~/final_release/boot/boot-magisk-patched.img
-          echo "✅ 已包含 Magisk 修补镜像: boot/boot-magisk-patched.img"
         fi
         
         # 4. 放入对应的 APK
         if [ "$ROOT_CHOICE" == "magisk" ]; then
-          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v30.6/Magisk.apk" -O ~/final_release/apk/Magisk.apk || echo "⚠️ Magisk.apk 下载失败，跳过"
+          MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Magisk.apk"
+          wget -q "$MAGISK_URL" -O ~/final_release/apk/Magisk.apk
+          if [ ! -s ~/final_release/apk/Magisk.apk ]; then
+            LATEST_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
+            wget -q "$LATEST_URL" -O ~/final_release/apk/Magisk.apk
+          fi
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
-          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/kernelsu-v0.9.5/KernelSU.apk" -O ~/final_release/apk/KernelSU.apk || echo "⚠️ KernelSU.apk 下载失败，跳过"
+          KSU_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/KernelSU.apk"
+          wget -q "$KSU_URL" -O ~/final_release/apk/KernelSU.apk
+          if [ ! -s ~/final_release/apk/KernelSU.apk ]; then
+            LATEST_URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4 | head -1)
+            wget -q "$LATEST_URL" -O ~/final_release/apk/KernelSU.apk
+          fi
         fi
         
-        # 5. 放入 Droidspaces APK（所有方案都带）
-        wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v1.0/Droidspaces.apk" -O ~/final_release/apk/Droidspaces.apk || echo "⚠️ Droidspaces.apk 下载失败，跳过"
+        # 5. 放入 Droidspaces APK
+        DS_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Droidspaces.apk"
+        wget -q "$DS_URL" -O ~/final_release/apk/Droidspaces.apk
+        if [ ! -s ~/final_release/apk/Droidspaces.apk ]; then
+          LATEST_URL=$(curl -s https://api.github.com/repos/ravindu644/Droidspaces-OSS/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4 | head -1)
+          wget -q "$LATEST_URL" -O ~/final_release/apk/Droidspaces.apk
+        fi
         
-        # 6. 写入一份 README 说明文件
-        cat > ~/final_release/README.txt << EOF
-        ========================================
-         OPPO A32 Linux Kit ($KIT_NAME)
-        ========================================
-        
+        # 6. 生成智能 README
+        if [ "$ROOT_CHOICE" == "magisk" ]; then
+          cat > ~/final_release/README.txt << EOF
+        ========================================================
+         OPPO A32 Linux Kit - Magisk 版本
+        ========================================================
         本压缩包由 GitHub Actions 自动构建，包含以下内容：
         
         【boot/】目录
-          - boot-magisk-patched.img : 已由 Magisk 自动修补的镜像（直接刷入即可获得 Root）
-          - boot-unpatched.img      : 未修补的镜像（如已选择 KernelSU，请直接刷入此项）
+          - boot-magisk-patched.img : 已由 Magisk 自动修补的镜像
+                                     （直接刷入即可获得 Root）
+          - boot-unpatched.img      : 未修补的镜像（备用）
         
         【kernel/】目录
-          - Image.gz                : 编译好的内核文件（用于手动打包或调试）
+          - Image.gz                : 编译好的内核文件（备用）
         
         【apk/】目录
-          - Magisk.apk 或 KernelSU.apk : 对应的 Root 管理器
-          - Droidspaces.apk            : Linux 容器运行工具
+          - Magisk.apk              : Magisk 管理器
+          - Droidspaces.apk         : Linux 容器运行工具
         
-        刷入方法：
-          fastboot flash boot boot/boot-magisk-patched.img
-          或
-          fastboot flash boot boot/boot-unpatched.img
-        
-        然后安装 apk 目录下的对应工具即可。
-        ========================================
+        【刷入方法】
+          1. 手机进入 Fastboot 模式。
+          2. 连接电脑，执行：
+             fastboot flash boot boot/boot-magisk-patched.img
+          3. 重启手机后，安装 apk 目录下的 Magisk.apk 和 Droidspaces.apk 即可。
+        ========================================================
         EOF
+        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
+          cat > ~/final_release/README.txt << EOF
+        ========================================================
+         OPPO A32 Linux Kit - KernelSU 版本
+        ========================================================
+        本压缩包由 GitHub Actions 自动构建，包含以下内容：
+        
+        【boot/】目录
+          - boot-unpatched.img      : 已集成 KernelSU 的内核镜像
+                                     （直接刷入即可获得 Root）
+        
+        【kernel/】目录
+          - Image.gz                : 编译好的内核文件（备用）
+        
+        【apk/】目录
+          - KernelSU.apk            : KernelSU 管理器
+          - Droidspaces.apk         : Linux 容器运行工具
+        
+        【刷入方法】
+          1. 手机进入 Fastboot 模式。
+          2. 连接电脑，执行：
+             fastboot flash boot boot/boot-unpatched.img
+          3. 重启手机后，安装 apk 目录下的 KernelSU.apk 和 Droidspaces.apk 即可。
+        ========================================================
+        EOF
+        else
+          cat > ~/final_release/README.txt << EOF
+        ========================================================
+         OPPO A32 Linux Kit - 无 Root 版本
+        ========================================================
+        本压缩包由 GitHub Actions 自动构建，包含以下内容：
+        
+        【boot/】目录
+          - boot-unpatched.img      : 未修补的 boot 镜像
+                                     （不含 Root，需自行获取 Root）
+        
+        【kernel/】目录
+          - Image.gz                : 编译好的内核文件（备用）
+        
+        【apk/】目录
+          - Droidspaces.apk         : Linux 容器运行工具
+        
+        【刷入方法】
+          1. 手机进入 Fastboot 模式。
+          2. 连接电脑，执行：
+             fastboot flash boot boot/boot-unpatched.img
+          3. 重启手机后，安装 Droidspaces.apk 即可。
+          4. 如需 Root，请自行使用 Magisk 或 KernelSU 修补 boot 镜像。
+        ========================================================
+        EOF
+        fi
         
         cd ~/final_release
         zip -r "${KIT_NAME}.zip" ./*
