@@ -1,3 +1,46 @@
+name: 打包 Boot 镜像（使用原生 unpackbootimg 和 mkbootimg）
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_type:
+        description: '选择要打包的内核（需上传到仓库 factory_boot 文件夹）'
+        required: true
+        default: 'Image.gz'
+        type: choice
+        options:
+          - Image.gz           # 纯 Droidspaces 内核（无KernelSU）
+          - Image.gz-ksu       # Droidspaces + KernelSU 内核
+          - stock              # 使用原厂内核（无Droidspaces支持）
+      root_type:
+        description: '选择 Root 方案'
+        required: true
+        default: 'magisk'
+        type: choice
+        options:
+          - magisk             # 自动修补 Magisk（如果失败，输出未修补镜像供手动修补）
+          - kernelsu           # 依靠内核自带 KernelSU，无需修补
+          - none               # 无 Root
+
+env:
+  GITHUB_REPO: Wytht-hhh/oppo-a32-clone-kernel
+  KERNEL_SOURCE_DIR: kernel/android_kernel_modules_and_devicetree_oppo_sm4250/source/android/kernel/msm-4.19
+
+jobs:
+  pack:
+    runs-on: ubuntu-22.04
+
+    steps:
+    # ================== 1. 拉取仓库代码 ==================
+    - name: 1. 拉取仓库代码
+      uses: actions/checkout@v4
+
+    # ================== 2. 安装基础工具 ==================
+    - name: 2. 安装基础工具
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget curl unzip gzip file
+
     - name: 3. 下载 unpackbootimg 和 mkbootimg
       run: |
         echo "====== 📦 下载 unpackbootimg 和 mkbootimg ======"
@@ -34,3 +77,201 @@
           exit 1
         fi
         echo "✅ 工具提取成功，架构验证通过"
+        
+    # ================== 4. 下载原厂 boot.img ==================
+    - name: 4. 下载原厂 boot.img
+      run: |
+        echo "====== 🧐 下载原厂 boot.img ======"
+        BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
+        wget -q "$BOOT_URL" -O boot.img
+        if [ ! -s boot.img ]; then
+          echo "❌ 原厂 boot.img 下载失败！"
+          exit 1
+        fi
+        echo "✅ 原厂 boot.img 下载成功"
+
+    # ================== 5. 验证内核配置（防呆机制） ==================
+    - name: 5. 验证内核配置
+      if: inputs.kernel_type != 'stock'
+      run: |
+        echo "====== 🔍 验证内核文件: ${{ inputs.kernel_type }} ======"
+        KERNEL_FILE="factory_boot/${{ inputs.kernel_type }}"
+        
+        if [ ! -f "$KERNEL_FILE" ]; then
+          echo "❌ 错误：在 factory_boot 文件夹中未找到 ${{ inputs.kernel_type }}！"
+          echo "请确认你已将该内核文件上传到仓库的 factory_boot 目录下。"
+          exit 1
+        fi
+        echo "✅ 文件存在，正在校验..."
+
+        if file "$KERNEL_FILE" | grep -q "gzip compressed data"; then
+          gzip -dc "$KERNEL_FILE" > Image_check
+        else
+          cp "$KERNEL_FILE" Image_check
+        fi
+        
+        if strings Image_check | grep -iq "kernelsu"; then
+          IS_KSU="yes"
+          echo "✅ 检测到 KernelSU 相关字符串。"
+        else
+          IS_KSU="no"
+          echo "ℹ️ 未检测到 KernelSU 相关字符串。"
+        fi
+        
+        if [ "${{ inputs.kernel_type }}" == "Image.gz-ksu" ] && [ "$IS_KSU" == "no" ]; then
+          echo "❌ 错误：你选择了 KernelSU 内核，但未检测到 KernelSU 符号！"
+          exit 1
+        fi
+        if [ "${{ inputs.kernel_type }}" == "Image.gz" ] && [ "$IS_KSU" == "yes" ]; then
+          echo "⚠️ 提示：你选择的是普通内核，但检测到了 KernelSU 符号。"
+        fi
+
+        if [ -f "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" ]; then
+          chmod +x "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig"
+          bash "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" Image_check > extracted_config 2>/dev/null || true
+          if [ -s extracted_config ]; then
+            if grep -q "CONFIG_USER_NS=y" extracted_config; then
+              echo "✅ Droidspaces 关键配置 (CONFIG_USER_NS) 已开启"
+            else
+              echo "⚠️ 警告：提取的配置中未找到 CONFIG_USER_NS=y，Droidspaces 可能无法运行！"
+            fi
+          else
+            echo "⚠️ 无法从内核镜像中提取配置（可能未开启 CONFIG_IKCONFIG）。"
+          fi
+        else
+          echo "⚠️ 未找到 extract-ikconfig 工具，跳过 Droidspaces 配置验证。"
+        fi
+        echo "✅ 验证步骤完成"
+
+    # ================== 6. 使用原生工具替换内核并打包 ==================
+    - name: 6. 使用原生工具替换内核并打包
+      run: |
+        echo "====== 🔧 使用 unpackbootimg 解包原厂 boot.img ======"
+        mkdir -p bootimg_out
+        # 运行 x86_64 原生工具解包
+        ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
+
+        echo "====== 🔄 替换内核 ======"
+        if [ "${{ inputs.kernel_type }}" == "stock" ]; then
+          echo "⚠️ 选择原厂内核，跳过替换步骤。"
+        else
+          echo "正在使用 ${{ inputs.kernel_type }} 替换内核..."
+          cp "../factory_boot/${{ inputs.kernel_type }}" bootimg_out/boot.img-kernel
+          echo "✅ 内核替换成功"
+        fi
+
+        echo "====== 📦 读取镜像原始参数并重新打包 ======"
+        cd bootimg_out
+        
+        CMDLINE=$(cat boot.img-cmdline)
+        BASE=$(cat boot.img-base)
+        PAGESIZE=$(cat boot.img-pagesize)
+        KERNEL_OFFSET=$(cat boot.img-kernel_offset)
+        RAMDISK_OFFSET=$(cat boot.img-ramdisk_offset)
+        SECOND_OFFSET=$(cat boot.img-second_offset)
+        TAGS_OFFSET=$(cat boot.img-tags_offset)
+        DTB_OFFSET=$(cat boot.img-dtb_offset)
+        OS_VERSION=$(cat boot.img-os_version)
+        OS_PATCH_LEVEL=$(cat boot.img-os_patch_level)
+        HEADER_VERSION=$(cat boot.img-header_version)
+
+        # 自动识别 ramdisk 文件名（可能是 .gz 或未压缩）
+        RAMDISK_ARG=""
+        if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"
+        elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"
+        fi
+
+        DTB_ARG=""
+        if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
+        SECOND_ARG=""
+        if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
+
+        # 使用 x86_64 原生 mkbootimg 重新打包
+        ../mkbootimg --kernel boot.img-kernel \
+                  $RAMDISK_ARG \
+                  $SECOND_ARG \
+                  $DTB_ARG \
+                  --cmdline "$CMDLINE" \
+                  --base $BASE \
+                  --pagesize $PAGESIZE \
+                  --kernel_offset $KERNEL_OFFSET \
+                  --ramdisk_offset $RAMDISK_OFFSET \
+                  --second_offset $SECOND_OFFSET \
+                  --tags_offset $TAGS_OFFSET \
+                  --dtb_offset $DTB_OFFSET \
+                  --os_version $OS_VERSION \
+                  --os_patch_level $OS_PATCH_LEVEL \
+                  --header_version $HEADER_VERSION \
+                  -o ../new-boot.img
+
+        cd ..
+        if [ -f "new-boot.img" ]; then
+          echo "✅ Boot 镜像打包成功！"
+        else
+          echo "❌ 打包失败，未找到生成的镜像文件！"
+          exit 1
+        fi
+
+    # ================== 7. 准备最终产物 ==================
+    - name: 7. 准备最终产物
+      if: always()
+      run: |
+        ROOT_CHOICE="${{ inputs.root_type }}"
+        if [ "$ROOT_CHOICE" == "magisk" ]; then KIT_NAME="A32-Kit-Magisk"
+        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then KIT_NAME="A32-Kit-KernelSU"
+        else KIT_NAME="A32-Kit-NoRoot"; fi
+
+        echo "====== 📦 构建最终产物: ${KIT_NAME}.zip ======"
+        mkdir -p ~/final_release/boot
+        mkdir -p ~/final_release/kernel
+        mkdir -p ~/final_release/apk
+
+        if [ "${{ inputs.kernel_type }}" != "stock" ]; then
+          cp factory_boot/${{ inputs.kernel_type }} ~/final_release/kernel/ || true
+        fi
+        if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
+
+        if [ "$ROOT_CHOICE" == "magisk" ]; then
+          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Alpha_v31000.apk || true
+        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
+          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/kernelsu-v0.9.5/KernelSU.apk" -O ~/final_release/apk/KernelSU.apk || true
+        fi
+        wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
+
+        echo "========================================================" > ~/final_release/README.txt
+        echo " OPPO A32 打包镜像使用说明" >> ~/final_release/README.txt
+        echo "========================================================" >> ~/final_release/README.txt
+        echo "本包由 GitHub Actions 自动打包生成。" >> ~/final_release/README.txt
+        echo "" >> ~/final_release/README.txt
+        echo "【你选择了】：$ROOT_CHOICE 方案，内核类型为 ${{ inputs.kernel_type }}" >> ~/final_release/README.txt
+        echo "" >> ~/final_release/README.txt
+        if [ "$ROOT_CHOICE" == "magisk" ]; then
+          echo "【刷入说明】" >> ~/final_release/README.txt
+          echo "  本包不含自动修补的镜像，请刷入 boot/boot-unpatched.img，" >> ~/final_release/README.txt
+          echo "  然后安装 apk/Alpha_v31000.apk 在手机上手动修补。" >> ~/final_release/README.txt
+        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
+          echo "【刷入说明】" >> ~/final_release/README.txt
+          echo "  直接刷入 boot/boot-unpatched.img 即可。" >> ~/final_release/README.txt
+          echo "  这个镜像的内核已经集成了 KernelSU，安装 apk/KernelSU.apk 即可管理 Root。" >> ~/final_release/README.txt
+        else
+          echo "【刷入说明】" >> ~/final_release/README.txt
+          echo "  直接刷入 boot/boot-unpatched.img 即可。" >> ~/final_release/README.txt
+          echo "  此镜像不包含 Root，仅包含 Droidspaces 支持。" >> ~/final_release/README.txt
+        fi
+        echo "" >> ~/final_release/README.txt
+        echo "【Droidspaces 说明】" >> ~/final_release/README.txt
+        echo "  安装 apk/Droidspaces.apk 并授予 Root 权限即可使用。" >> ~/final_release/README.txt
+        echo "  如果需要完整的 Linux 桌面，请在 App 内下载 Debian RootFS。" >> ~/final_release/README.txt
+        echo "========================================================" >> ~/final_release/README.txt
+
+        cd ~/final_release
+        zip -r "${KIT_NAME}.zip" ./*
+        echo "====== ✅ 最终产物打包完毕: ${KIT_NAME}.zip ======"
+
+    # ================== 8. 上传最终产物 ==================
+    - name: 8. 上传最终产物
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: A32-Image-Kit
+        path: ~/final_release/*.zip
