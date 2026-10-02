@@ -1,4 +1,4 @@
-name: 打包 Boot 镜像（使用 unpackbootimg 和 mkbootimg）
+name: 打包 Boot 镜像（使用原生 unpackbootimg 和 mkbootimg）
 
 on:
   workflow_dispatch:
@@ -41,29 +41,25 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y wget unzip gzip file
 
-    # ================== 3. 下载 AIK 工具并提取 unpackbootimg / mkbootimg ==================
-    - name: 3. 下载 AIK 并提取工具
+    # ================== 3. 下载独立工具并赋予权限 ==================
+    - name: 3. 下载 unpackbootimg 和 mkbootimg
       run: |
-        echo "====== 📦 下载 AIK 镜像并提取打包工具 ======"
-        # 使用稳定的 AIK 源
-        wget -q "https://github.com/SebaUbuntu/AIK-Linux-mirror/archive/refs/heads/master.zip" -O aik.zip
-        if [ ! -s aik.zip ]; then
-          echo "❌ AIK 下载失败！"
-          exit 1
-        fi
-        unzip -q aik.zip -d aik_temp
+        echo "====== 📦 下载独立打包工具 ======"
+        # 直接从稳定的源下载这两个独立的二进制工具
+        wget -q "https://github.com/ravindu644/Droidspaces-OSS/raw/main/Droidspaces/tools/unpackbootimg" -O unpackbootimg
+        wget -q "https://github.com/ravindu644/Droidspaces-OSS/raw/main/Droidspaces/tools/mkbootimg" -O mkbootimg
         
-        # 自动寻找 bin 目录，里面包含 unpackbootimg 和 mkbootimg
-        BIN_DIR=$(find aik_temp -type d -name "bin" | head -1)
-        if [ -z "$BIN_DIR" ]; then
-          echo "❌ 在 AIK 中未找到 bin 目录！"
-          exit 1
+        if [ ! -f "unpackbootimg" ] || [ ! -f "mkbootimg" ]; then
+          echo "❌ 工具下载失败，尝试从备用源下载..."
+          # 备用源：直接拉取 AOSP 的编译结果（这里用 osm0sis 的 AIK 中的二进制作为兜底）
+          wget -q "https://github.com/osm0sis/AIK-Linux/archive/refs/heads/master.zip" -O aik_master.zip
+          unzip -q aik_master.zip
+          cp AIK-Linux-master/bin/unpackbootimg ./unpackbootimg
+          cp AIK-Linux-master/bin/mkbootimg ./mkbootimg
         fi
         
-        # 将 bin 目录添加到 PATH，方便后续直接调用
-        echo "$(pwd)/$BIN_DIR" >> $GITHUB_PATH
-        chmod +x $BIN_DIR/*
-        echo "✅ 工具提取成功，已添加到 PATH"
+        chmod +x ./unpackbootimg ./mkbootimg
+        echo "✅ 工具准备完毕"
 
     # ================== 4. 下载原厂 boot.img ==================
     - name: 4. 下载原厂 boot.img
@@ -135,7 +131,8 @@ jobs:
       run: |
         echo "====== 🔧 使用 unpackbootimg 解包原厂 boot.img ======"
         mkdir -p bootimg_out
-        unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
+        # 直接使用当前目录下的可执行文件，绝对不会有 command not found
+        ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
 
         echo "====== 🔄 替换内核 ======"
         if [ "${{ inputs.kernel_type }}" == "stock" ]; then
@@ -149,7 +146,6 @@ jobs:
         echo "====== 📦 读取镜像原始参数并重新打包 ======"
         cd bootimg_out
         
-        # 读取解包时产生的参数文件
         CMDLINE=$(cat boot.img-cmdline)
         BASE=$(cat boot.img-base)
         PAGESIZE=$(cat boot.img-pagesize)
@@ -162,13 +158,13 @@ jobs:
         OS_PATCH_LEVEL=$(cat boot.img-os_patch_level)
         HEADER_VERSION=$(cat boot.img-header_version)
 
-        # 检查 dtb 和 second 是否存在（部分镜像没有）
         DTB_ARG=""
         if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
         SECOND_ARG=""
         if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
 
-        mkbootimg --kernel boot.img-kernel \
+        # 使用当前目录下的 mkbootimg
+        ../mkbootimg --kernel boot.img-kernel \
                   --ramdisk boot.img-ramdisk.gz \
                   $SECOND_ARG \
                   $DTB_ARG \
