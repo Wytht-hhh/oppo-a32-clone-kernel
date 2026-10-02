@@ -39,45 +39,36 @@ jobs:
     - name: 2. 安装基础工具
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget curl unzip gzip file
+        sudo apt-get install -y wget unzip gzip file
 
-    - name: 3. 下载 unpackbootimg 和 mkbootimg
+    # ================== 3. 从仓库提取打包工具 ==================
+    - name: 3. 从仓库提取 unpackbootimg 和 mkbootimg
       run: |
-        echo "====== 📦 下载 unpackbootimg 和 mkbootimg ======"
+        echo "====== 📦 从仓库提取 unpackbootimg 和 mkbootimg ======"
         
-        # 方法1：直接 clone AIK 仓库（最纯净，且避开 404 问题）
-        GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/osm0sis/AIK-Linux.git aikl 2>/dev/null
-        
-        if [ -d "aikl" ] && [ -f "aikl/bin/unpackbootimg" ]; then
-          cp aikl/bin/unpackbootimg ./unpackbootimg
-          cp aikl/bin/mkbootimg ./mkbootimg
-          echo "✅ 从 AIK 仓库提取工具成功"
-        else
-          # 方法2：下载 ZIP 包（备用方案）
-          echo "⚠️ 仓库克隆失败，尝试下载 ZIP 包..."
-          wget -q --timeout=60 --tries=3 --retry-connrefused "https://github.com/osm0sis/AIK-Linux/archive/refs/heads/master.zip" -O aik_master.zip
-          if [ ! -s aik_master.zip ]; then
-            echo "❌ AIK 压缩包下载失败！"
-            exit 1
-          fi
-          unzip -q aik_master.zip -d aik_temp
-          cp aik_temp/AIK-Linux-master/bin/unpackbootimg ./unpackbootimg
-          cp aik_temp/AIK-Linux-master/bin/mkbootimg ./mkbootimg
+        # 检查仓库中是否存在工具文件
+        if [ ! -f "tools/unpackbootimg" ] || [ ! -f "tools/mkbootimg" ]; then
+          echo "❌ 错误：在仓库 tools 文件夹中未找到 unpackbootimg 或 mkbootimg！"
+          echo "请确保你已将它们正确上传到仓库的 tools 目录下。"
+          exit 1
         fi
         
+        cp tools/unpackbootimg ./unpackbootimg
+        cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
         
         echo "====== 🔍 验证工具架构 ======"
         file ./unpackbootimg
         file ./mkbootimg
         
-        # 关键检查：确保它是真正的 ELF 可执行文件，而不是文本文件
+        # 关键检查：确保它是 x86-64 架构的 ELF 可执行文件
         if ! file ./unpackbootimg | grep -q "ELF 64-bit LSB executable"; then
-          echo "❌ 错误：下载的 unpackbootimg 不是有效的 x86_64 可执行文件！"
+          echo "❌ 错误：仓库中的 unpackbootimg 不是有效的 x86_64 可执行文件！"
+          echo "请重新上传正确的文件（不要上传文本或 ARM 架构的文件）。"
           exit 1
         fi
         echo "✅ 工具提取成功，架构验证通过"
-        
+
     # ================== 4. 下载原厂 boot.img ==================
     - name: 4. 下载原厂 boot.img
       run: |
