@@ -106,6 +106,25 @@ jobs:
           echo "CONFIG_KSU_DEBUG=n" >> config/phone.config
         fi
 
+        # ============================================================
+        # 🔧 补丁：修复 fs/sync.c 中缺失的 fsync_time 变量定义
+        # ============================================================
+        echo "====== 🔧 应用源码兼容性补丁 ======"
+        cd ${{ env.KERNEL_SOURCE_DIR }}
+        if [ -f "fs/sync.c" ]; then
+          # 如果文件中没有定义 fsync_time，就在文件开头插入定义
+          if ! grep -q "unsigned long fsync_time;" fs/sync.c; then
+            sed -i '1i unsigned long fsync_time;' fs/sync.c
+            echo "✅ 已在 fs/sync.c 中插入 fsync_time 定义"
+          else
+            echo "✅ fsync_time 定义已存在，跳过补丁"
+          fi
+        fi
+        cd ${{ github.workspace }}
+
+        # ============================================================
+        # 🔧 开始正式编译
+        # ============================================================
         echo "====== 🔧 开始编译 ======"
         cp config/phone.config .config
         chmod +x build_kernel.sh
