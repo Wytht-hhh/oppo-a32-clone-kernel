@@ -1,33 +1,25 @@
-name: 全自动编译并打包 Boot 镜像
+name: OPPO A32 全自动化内核编译与打包（兼容 C11/C12）
 
 on:
   workflow_dispatch:
     inputs:
-      build_type:
-        description: '选择构建类型'
-        required: true
-        default: 'kernel_and_boot'
-        type: choice
-        options:
-          - kernel_only       # 仅编译内核（最快）
-          - kernel_and_boot   # 编译内核 + 打包 Boot 镜像（推荐）
       root_choice:
         description: '选择 Root 方案'
         required: true
         default: 'magisk'
         type: choice
         options:
-          - magisk            # 编译普通内核 + Magisk.apk（需手动修补）
-          - kernelsu          # 编译集成 KernelSU 内核 + KernelSU.apk
-          - none              # 无 Root，仅 Droidspaces 支持
+          - magisk            # 编译普通内核 + 打包 + Magisk.apk（需手动修补）
+          - kernelsu          # 编译集成 KernelSU 的内核 + 打包 + KernelSU.apk
+          - none              # 只编译内核 + 打包，无 Root
       include_apk:
-        description: '是否打包 Droidspaces.apk 等工具（加快速度可关闭）？'
+        description: '是否打包 Droidspaces.apk 等工具以加快速度？'
         required: true
         default: 'yes'
         type: choice
         options:
-          - 'yes'             # 包含 APK，方便直接用
-          - 'no'              # 不包含 APK，纯内核/镜像输出
+          - 'yes'
+          - 'no'
 
 env:
   GITHUB_REPO: Wytht-hhh/oppo-a32-clone-kernel
@@ -49,37 +41,18 @@ jobs:
         sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget
         sudo mkdir -p /lib/firmware
 
-    # ================== 3. 严格校验内核文件（防假成功） ==================
-    - name: 3. 严格校验内核文件
-      if: inputs.build_type == 'kernel_and_boot'
-      run: |
-        echo "====== 🔍 检查用户上传的内核文件（防止假成功） ======"
-        if [ -f "factory_boot/phone.config" ]; then
-          echo "✅ 检测到自定义配置 factory_boot/phone.config"
-        fi
-        
-        # 校验内核文件是否存在（针对打包模式）
-        if [ "${{ inputs.build_type }}" == "kernel_and_boot" ]; then
-          KERNEL_FILE="factory_boot/Image.gz"
-          if [ ! -f "$KERNEL_FILE" ]; then
-            echo "⚠️ 警告：未在 factory_boot 中找到 Image.gz，将使用编译产出的内核。"
-            echo "当前目录下有这些内核文件："
-            ls -lh factory_boot/
-          fi
-        fi
-
-    # ================== 4. 准备配置文件 ==================
-    - name: 4. 准备配置文件
+    # ================== 3. 准备并合并配置文件 ==================
+    - name: 3. 准备并合并配置文件
       run: |
         echo "====== 🛠️ 准备内核配置文件 ======"
         if [ -f "factory_boot/phone.config" ]; then
-          echo "✅ 使用你上传的 phone.config（最匹配你的手机）"
+          echo "✅ 检测到用户上传的 factory_boot/phone.config，正在使用..."
           cp factory_boot/phone.config config/phone.config
         else
-          echo "ℹ️ 使用仓库默认的 config/phone.config"
+          echo "ℹ️ 未检测到自定义配置，使用仓库默认的 config/phone.config"
         fi
-        
-        # 强制开启 Droidspaces 必需的内核配置
+
+        echo "====== 🔧 写入 Droidspaces 必需的配置 ======"
         sed -i 's/# CONFIG_USER_NS is not set/CONFIG_USER_NS=y/g' config/phone.config
         echo "CONFIG_USER_NS=y" >> config/phone.config
         echo "CONFIG_PID_NS=y" >> config/phone.config
@@ -89,21 +62,47 @@ jobs:
         echo "CONFIG_MEMCG=y" >> config/phone.config
         echo "CONFIG_CGROUP_DEVICE=y" >> config/phone.config
         echo "CONFIG_DEVTMPFS=y" >> config/phone.config
+
+    # ================== 4. 修复源码 Bug（关键步骤） ==================
+    - name: 4. 修复源码 Bug 以兼容 C12 配置
+      run: |
+        echo "====== 🔧 应用源码兼容性补丁 ======"
+        cd ${{ env.KERNEL_SOURCE_DIR }}
+
         # ============================================================
-        # 🔧 修复：禁用引起编译报错的 OPLUS UIFIRST 功能
+        # 修复 1：ion 内存管理驱动的变量未声明 Bug
+        # C12 配置开启了内存统计，但 C11 源码中漏写了变量声明。
+        # 在文件开头强行插入变量定义，让编译器能找到它。
         # ============================================================
-        echo "====== 🔧 禁用导致编译失败的 UIFIRST 功能 ======"
-        # 1. 移除可能存在的开启项
-        sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' config/phone.config
-        # 2. 强制在文件末尾追加关闭指令（覆盖之前的配置）
-        echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> config/phone.config
-        echo "✅ UIFIRST 功能已禁用，避免编译报错"
+        if [ -f "drivers/staging/android/ion/ion.c" ]; then
+            sed -i '1i int ion_cnt_enable = 0;' drivers/staging/android/ion/ion.c
+            sed -i '1i atomic_long_t ion_total_size = ATOMIC_INIT(0);' drivers/staging/android/ion/ion.c
+            echo "✅ 已修复 ion.c 变量未定义问题"
+        fi
+
+        # ============================================================
+        # 修复 2：uifirst 调度器不兼容 Bug
+        # C12 配置开启了该功能，但 C11 源码不完整，缺少结构体成员。
+        # 我们不需要这个功能，直接在 Makefile 中禁用整个目录的编译。
+        # ============================================================
+        if [ -f "kernel/uifirst/Makefile" ]; then
+            sed -i 's/obj-y/obj-/' kernel/uifirst/Makefile
+            echo "✅ 已在 Makefile 中禁用 uifirst 编译"
+        fi
+
+        # 同时在 config 配置层面彻底关闭这个功能，双保险
+        sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' ../../../config/phone.config
+        echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> ../../../config/phone.config
+        echo "✅ 已在配置文件中禁用 UIFIRST"
+
+        cd ${{ github.workspace }}
+
     # ================== 5. 编译内核 ==================
     - name: 5. 编译内核
       run: |
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        
+
         # 如果选择了 KernelSU，先集成源码
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           echo "====== 🔧 集成 KernelSU v0.9.5 ======"
@@ -114,25 +113,6 @@ jobs:
           echo "CONFIG_KSU_DEBUG=n" >> config/phone.config
         fi
 
-        # ============================================================
-        # 🔧 补丁：修复 fs/sync.c 中缺失的 fsync_time 变量定义
-        # ============================================================
-        echo "====== 🔧 应用源码兼容性补丁 ======"
-        cd ${{ env.KERNEL_SOURCE_DIR }}
-        if [ -f "fs/sync.c" ]; then
-          # 如果文件中没有定义 fsync_time，就在文件开头插入定义
-          if ! grep -q "unsigned long fsync_time;" fs/sync.c; then
-            sed -i '1i unsigned long fsync_time;' fs/sync.c
-            echo "✅ 已在 fs/sync.c 中插入 fsync_time 定义"
-          else
-            echo "✅ fsync_time 定义已存在，跳过补丁"
-          fi
-        fi
-        cd ${{ github.workspace }}
-
-        # ============================================================
-        # 🔧 开始正式编译
-        # ============================================================
         echo "====== 🔧 开始编译 ======"
         cp config/phone.config .config
         chmod +x build_kernel.sh
@@ -147,16 +127,18 @@ jobs:
         echo "====== 📁 提取内核 ======"
         mkdir -p ~/compiled_kernel
         cp ./build/arch/arm64/boot/Image.gz ~/compiled_kernel/Image.gz || { echo "❌ 未找到内核文件！"; exit 1; }
-        ls -lh ~/compiled_kernel/
 
-    # ================== 6. 打包 Boot 镜像（仅当选择 kernel_and_boot） ==================
+    # ================== 6. 使用独立工具打包 ==================
     - name: 6. 打包 Boot 镜像
-      if: inputs.build_type == 'kernel_and_boot'
       run: |
-        echo "====== 📦 准备独立打包工具 ======"
+        echo "====== 📦 准备打包工具 ======"
         cp tools/unpackbootimg ./unpackbootimg
         cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
+        if ! file ./unpackbootimg | grep -q "ELF 64-bit LSB executable"; then
+          echo "❌ 工具架构错误！"
+          exit 1
+        fi
 
         echo "====== 🧐 下载原厂 boot.img ======"
         wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img" -O boot.img
@@ -165,15 +147,7 @@ jobs:
         echo "====== 🔧 解包并替换内核 ======"
         mkdir -p bootimg_out
         ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
-        
-        # 如果用户上传了内核，优先用用户的；否则用刚编译的
-        if [ -f "factory_boot/Image.gz" ]; then
-          cp factory_boot/Image.gz bootimg_out/boot.img-kernel
-          echo "✅ 使用 factory_boot 中的内核替换"
-        else
-          cp ~/compiled_kernel/Image.gz bootimg_out/boot.img-kernel
-          echo "✅ 使用刚编译的内核替换"
-        fi
+        cp ~/compiled_kernel/Image.gz bootimg_out/boot.img-kernel
 
         echo "====== 📦 重新打包 ======"
         cd bootimg_out
@@ -208,15 +182,14 @@ jobs:
 
         mkdir -p ~/final_release/boot ~/final_release/kernel ~/final_release/apk
 
-        # 1. 内核
+        # 1. 放入内核
         if [ -f ~/compiled_kernel/Image.gz ]; then cp ~/compiled_kernel/Image.gz ~/final_release/kernel/; fi
-
-        # 2. Boot 镜像
+        
+        # 2. 放入未修补的 boot 镜像
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
 
         # 3. 按需下载 APK
         if [ "${{ inputs.include_apk }}" == "yes" ]; then
-          echo "====== 📥 下载 APK 工具 ======"
           if [ "$ROOT_CHOICE" == "magisk" ]; then
             wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Magisk.apk || true
           elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
@@ -227,7 +200,7 @@ jobs:
           echo "⏭️ 已跳过 APK 下载，加快输出速度。"
         fi
 
-        # 4. 动态 README
+        # 4. 动态生成 README
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 Linux Kit 使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
@@ -258,6 +231,7 @@ jobs:
         zip -r "${KIT_NAME}.zip" ./*
         echo "====== ✅ 打包完成: ${KIT_NAME}.zip ======"
 
+    # ================== 8. 上传最终产物 ==================
     - name: 8. 上传最终产物
       if: always()
       uses: actions/upload-artifact@v4
