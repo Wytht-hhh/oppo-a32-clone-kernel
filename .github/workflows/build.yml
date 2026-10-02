@@ -18,7 +18,7 @@ on:
         default: 'magisk'
         type: choice
         options:
-          - magisk            # 自动修补 Magisk（如果失败，可手动修补）
+          - magisk            # 自动修补 Magisk
           - kernelsu          # 编译时集成 KernelSU
           - none              # 不附带 Root 工具
       custom_boot_url:
@@ -111,11 +111,10 @@ jobs:
         grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_OVERLAY_FS|CONFIG_SECCOMP|CONFIG_PID_NS|CONFIG_NET_NS" .config
 
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
-          echo "====== ✅ 验证 KernelSU 配置 ======"
           if grep -q "CONFIG_KSU=y" .config; then
-            echo "✅ CONFIG_KSU=y 已生效，KernelSU 集成成功！"
+            echo "✅ KernelSU 集成成功"
           else
-            echo "❌ 警告：CONFIG_KSU=y 未找到，KernelSU 可能集成失败！"
+            echo "⚠️ 警告：KernelSU 可能集成失败"
           fi
         fi
 
@@ -138,95 +137,69 @@ jobs:
       run: |
         export TERM=xterm
         echo "====== 📦 准备 AIK 打包工具 ======"
-        # 优先从 GitHub 官方仓库克隆（比从 Release 下载更稳定，避免命名和标签问题）
-        git clone --depth=1 https://github.com/BuildVoid/AIK-Linux-mirror.git aik
-        if [ ! -d "aik" ]; then
-          echo "⚠️ 在线克隆 AIK 失败，尝试从 Release 下载..."
-          AIK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/AIK-linux-mirror/AIK-linux-mirror.zip"
-          wget -q "$AIK_URL" -O aik.zip
-          if [ -s aik.zip ]; then
-            unzip -q aik.zip -d aik_temp
-            mv aik_temp/* aik 2>/dev/null || true
-          fi
+        # 优先使用你 Release 中的 AIK 真实链接
+        AIK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/AIK-Linux-mirror/AIK-Linux-mirror-master.zip"
+        wget -q "$AIK_URL" -O aik.zip
+        if [ -s aik.zip ]; then
+          unzip -q aik.zip -d aik_temp
+          mv aik_temp/* aik 2>/dev/null || true
+        else
+          echo "⚠️ 从 Release 下载 AIK 失败，尝试在线克隆..."
+          git clone --depth=1 https://github.com/BuildVoid/AIK-Linux-mirror.git aik
         fi
         if [ ! -d "aik" ] || [ ! -f "aik/unpackimg.sh" ]; then
-          echo "❌ AIK 准备失败！请检查网络！"
+          echo "❌ AIK 准备失败！"
           exit 1
         fi
         cd aik
         chmod +x unpackimg.sh repackimg.sh cleanimg.sh
 
         echo "====== 🧐 获取原厂 boot.img ======"
-        # 优先使用用户自定义的直链下载
         if [ -n "${{ inputs.custom_boot_url }}" ]; then
-          echo "检测到自定义下载链接，正在下载原厂 boot.img..."
           wget -q "${{ inputs.custom_boot_url }}" -O ../boot.img
         else
-          echo "未提供自定义链接，尝试从 Release 下载..."
+          # 使用你 Release 中的原厂 boot.img 真实链接
           BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
           wget -q "$BOOT_URL" -O ../boot.img
         fi
-        if [ ! -s ../boot.img ]; then
-          echo "❌ 原厂 boot.img 下载失败！停止打包。"
-          exit 1
-        fi
+        if [ ! -s ../boot.img ]; then echo "❌ 原厂 boot.img 下载失败！"; exit 1; fi
 
         echo "====== 🔧 解包原厂 boot.img ======"
-        ./unpackimg.sh ../boot.img || { echo "❌ 解包失败，请检查日志！"; exit 1; }
+        ./unpackimg.sh ../boot.img || { echo "❌ 解包失败！"; exit 1; }
 
         echo "====== 🔄 替换内核 ======"
         if [ "${{ inputs.build_type }}" == "kernel_and_boot" ]; then
           cp ~/compiled_kernel/Image.gz ./split_img/boot.img-kernel
-          echo "✅ 已使用刚编译出的内核替换。"
         else
-          echo "⚠️ boot_only 模式，尝试获取用户提供的内核..."
           if [ -n "${{ inputs.custom_kernel_url }}" ]; then
             wget -q "${{ inputs.custom_kernel_url }}" -O ../custom_kernel.gz
-            if [ -s ../custom_kernel.gz ]; then
-              cp ../custom_kernel.gz ./split_img/boot.img-kernel
-              echo "✅ 已使用自定义内核替换。"
-            else
-              echo "❌ 自定义内核下载失败！"
-              exit 1
-            fi
+            if [ -s ../custom_kernel.gz ]; then cp ../custom_kernel.gz ./split_img/boot.img-kernel; else echo "❌ 自定义内核下载失败！"; exit 1; fi
           else
-            echo "❌ boot_only 模式需要你提供 factory_boot/boot.img-kernel 文件，或者填入 custom_kernel_url 链接！"
+            echo "❌ boot_only 模式需要 custom_kernel_url 链接！"
             exit 1
           fi
         fi
 
         echo "====== 📦 重新打包生成 Boot 镜像 ======"
         ./repackimg.sh || true
-
-        # 检查生成的镜像文件，防止因环境问题导致文件名变化
-        if [ -f "image-new.img" ]; then
-            mv image-new.img ../new-boot.img
-            echo "✅ Boot 镜像打包成功！"
-        elif [ -f "boot.img" ]; then
-            mv boot.img ../new-boot.img
-            echo "✅ 发现重新打包的 boot.img，已重命名为 new-boot.img"
-        else
-            echo "❌ 打包失败：未找到生成的镜像文件！"
-            echo "💡 排查建议：可能是 cpio 版本问题，或者 AIK 脚本执行权限不足，请检查日志。"
-            exit 1
-        fi
+        if [ -f "image-new.img" ]; then mv image-new.img ../new-boot.img; echo "✅ Boot 镜像打包成功！"
+        elif [ -f "boot.img" ]; then mv boot.img ../new-boot.img; echo "✅ Boot 镜像打包成功！"
+        else echo "❌ 打包失败，未找到生成的镜像文件！"; exit 1; fi
 
     # ================== 6. Magisk 自动修补 ==================
     - name: 6. Magisk 自动修补
       if: (inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot') && inputs.root_choice == 'magisk' && hashFiles('new-boot.img') != ''
       run: |
         echo "====== 📥 下载 Magisk APK ======"
-        MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Magisk.apk"
+        # 使用你 Release 中的 Alpha Magisk 真实链接
+        MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk"
         wget -q "$MAGISK_URL" -O Magisk.apk
         if [ ! -s Magisk.apk ]; then
+          echo "⚠️ Release 中未找到，尝试从官方仓库下载最新版..."
           LATEST_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
           wget -q "$LATEST_URL" -O Magisk.apk
         fi
-
-        if [ ! -s Magisk.apk ]; then
-          echo "❌ Magisk 下载失败，跳过自动修补。请手动用 Magisk App 修补 new-boot.img"
-          exit 0
-        fi
+        if [ ! -s Magisk.apk ]; then echo "❌ Magisk 下载失败，跳过自动修补。"; exit 0; fi
 
         echo "====== 🔧 提取 Magisk 修补工具 ======"
         mkdir -p magisk_patch
@@ -234,8 +207,8 @@ jobs:
 
         echo "====== 🩹 执行 Magisk 修补 ======"
         cd magisk_patch
-        export MAGISK_VER=30.6
-        export MAGISK_VER_CODE=30600
+        export MAGISK_VER=31.0
+        export MAGISK_VER_CODE=31000
         PATCH_SCRIPT=$(find . -name "boot_patch.sh" | head -1)
         if [ -n "$PATCH_SCRIPT" ]; then
           cp ../new-boot.img ./boot.img
@@ -243,55 +216,51 @@ jobs:
           cd $(dirname "$PATCH_SCRIPT")
           sh boot_patch.sh ../boot.img || true
           cd ../..
-          if [ -f "magisk_patched.img" ]; then
-            cp magisk_patched.img ../new-boot-magisk-patched.img
-            echo "✅ Magisk 自动修补成功！"
-          fi
-        else
-          echo "⚠️ 未找到 boot_patch.sh，跳过自动修补。请手动用 Magisk App 修补。"
-        fi
+          if [ -f "magisk_patched.img" ]; then cp magisk_patched.img ../new-boot-magisk-patched.img; echo "✅ Magisk 自动修补成功！"; fi
+        else echo "⚠️ 未找到 boot_patch.sh，跳过修补。"; fi
 
     # ================== 7. 准备最终产物 ==================
     - name: 7. 准备最终产物
       if: always() && (inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot')
       run: |
         ROOT_CHOICE="${{ inputs.root_choice }}"
-        if [ "$ROOT_CHOICE" == "magisk" ]; then
-          KIT_NAME="A32-Kit-Magisk"
-        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
-          KIT_NAME="A32-Kit-KernelSU"
-        else
-          KIT_NAME="A32-Kit-NoRoot"
-        fi
+        if [ "$ROOT_CHOICE" == "magisk" ]; then KIT_NAME="A32-Kit-Magisk"
+        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then KIT_NAME="A32-Kit-KernelSU"
+        else KIT_NAME="A32-Kit-NoRoot"; fi
 
         echo "====== 📦 构建最终产物: ${KIT_NAME}.zip ======"
         mkdir -p ~/final_release/boot
         mkdir -p ~/final_release/kernel
         mkdir -p ~/final_release/apk
 
-        # 1. 放入内核（无论打包是否成功，只要编译出来就放进去）
+        # 1. 放入内核
         if [ -f ~/compiled_kernel/Image.gz ]; then cp ~/compiled_kernel/Image.gz ~/final_release/kernel/; fi
         
-        # 2. 放入未修补的 boot 镜像（非常重要，这是你手动修补用的源文件）
+        # 2. 放入未修补的 boot 镜像
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
         
-        # 3. 放入 Magisk 修补后的镜像（如果自动修补成功）
+        # 3. 放入 Magisk 修补后的镜像
         if [ -f new-boot-magisk-patched.img ]; then cp new-boot-magisk-patched.img ~/final_release/boot/boot-magisk-patched.img; fi
 
-        # 4. 放入对应的 APK
+        # 4. 下载对应的 APK
         if [ "$ROOT_CHOICE" == "magisk" ]; then
-          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Magisk.apk" -O ~/final_release/apk/Magisk.apk || true
+          MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk"
+          wget -q "$MAGISK_URL" -O ~/final_release/apk/Alpha_v31000.apk || true
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
-          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/KernelSU.apk" -O ~/final_release/apk/KernelSU.apk || true
+          KSU_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/kernelsu-v0.9.5/KernelSU.apk"
+          wget -q "$KSU_URL" -O ~/final_release/apk/KernelSU.apk || true
         fi
-        wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Droidspaces.apk" -O ~/final_release/apk/Droidspaces.apk || true
+        # 所有方案都带 Droidspaces
+        DS_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk"
+        wget -q "$DS_URL" -O ~/final_release/apk/Droidspaces.apk || true
 
-        # 5. 生成通用 README
+        # 5. 生成 README（逐行 echo，根据选择输出不同说明）
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 Kit 使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
         echo "" >> ~/final_release/README.txt
         echo "本压缩包由 GitHub Actions 自动构建生成。" >> ~/final_release/README.txt
+        echo "你选择的是：$ROOT_CHOICE 方案。" >> ~/final_release/README.txt
         echo "" >> ~/final_release/README.txt
         echo "【目录说明】" >> ~/final_release/README.txt
         echo "  boot/   - 存放 boot 镜像文件" >> ~/final_release/README.txt
@@ -305,17 +274,30 @@ jobs:
         echo "" >> ~/final_release/README.txt
 
         if [ "$ROOT_CHOICE" == "magisk" ]; then
-          echo "【Magisk 方案】" >> ~/final_release/README.txt
-          echo "  刷 boot/boot-magisk-patched.img" >> ~/final_release/README.txt
-          echo "  安装 apk/Magisk.apk 和 apk/Droidspaces.apk" >> ~/final_release/README.txt
+          echo "【Magisk 方案说明】" >> ~/final_release/README.txt
+          echo "  你选择了 Magisk，因此本包包含：" >> ~/final_release/README.txt
+          echo "  - boot/boot-magisk-patched.img：已用 Magisk 自动修补，直接刷入即可获得 Root。" >> ~/final_release/README.txt
+          echo "  - boot/boot-unpatched.img：未修补的镜像，作为备用。" >> ~/final_release/README.txt
+          echo "  - kernel/Image.gz：编译好的内核文件，备用。" >> ~/final_release/README.txt
+          echo "  - apk/Alpha_v31000.apk：Magisk 管理器，刷机后安装。" >> ~/final_release/README.txt
+          echo "  - apk/Droidspaces.apk：Linux 容器工具，刷机后安装。" >> ~/final_release/README.txt
+          echo "  如果自动修补失败，boot-magisk-patched.img 不会生成，" >> ~/final_release/README.txt
+          echo "  请手动用 Magisk App 修补 boot-unpatched.img。" >> ~/final_release/README.txt
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
-          echo "【KernelSU 方案】" >> ~/final_release/README.txt
-          echo "  刷 boot/boot-unpatched.img" >> ~/final_release/README.txt
-          echo "  安装 apk/KernelSU.apk 和 apk/Droidspaces.apk" >> ~/final_release/README.txt
+          echo "【KernelSU 方案说明】" >> ~/final_release/README.txt
+          echo "  你选择了 KernelSU，因此本包包含：" >> ~/final_release/README.txt
+          echo "  - boot/boot-unpatched.img：内核已集成 KernelSU，直接刷入即可获得 Root。" >> ~/final_release/README.txt
+          echo "  - kernel/Image.gz：编译好的内核文件，备用。" >> ~/final_release/README.txt
+          echo "  - apk/KernelSU.apk：KernelSU 管理器，刷机后安装。" >> ~/final_release/README.txt
+          echo "  - apk/Droidspaces.apk：Linux 容器工具，刷机后安装。" >> ~/final_release/README.txt
+          echo "  此方案没有单独的 Magisk 修补镜像，因为 Root 已集成在内核里。" >> ~/final_release/README.txt
         else
-          echo "【无 Root 方案】" >> ~/final_release/README.txt
-          echo "  刷 boot/boot-unpatched.img" >> ~/final_release/README.txt
-          echo "  安装 apk/Droidspaces.apk" >> ~/final_release/README.txt
+          echo "【无 Root 方案说明】" >> ~/final_release/README.txt
+          echo "  你选择了无 Root，因此本包包含：" >> ~/final_release/README.txt
+          echo "  - boot/boot-unpatched.img：未修补的纯净镜像，不含任何 Root。" >> ~/final_release/README.txt
+          echo "  - kernel/Image.gz：编译好的内核文件，备用。" >> ~/final_release/README.txt
+          echo "  - apk/Droidspaces.apk：Linux 容器工具，刷机后安装。" >> ~/final_release/README.txt
+          echo "  此方案没有 Root 相关文件，如需 Root 请自行修补。" >> ~/final_release/README.txt
         fi
 
         echo "" >> ~/final_release/README.txt
@@ -326,15 +308,11 @@ jobs:
         echo "========================================================" >> ~/final_release/README.txt
 
         cd ~/final_release
-        if [ -z "$(ls -A ~/final_release)" ]; then
-          echo "❌ final_release 目录为空，无法打包！"
-          exit 1
-        fi
-
+        if [ -z "$(ls -A ~/final_release)" ]; then echo "❌ final_release 目录为空！"; exit 1; fi
         zip -r "${KIT_NAME}.zip" ./*
         echo "====== ✅ 最终产物打包完毕: ${KIT_NAME}.zip ======"
         ls -lh "${KIT_NAME}.zip"
-        
+
     # ================== 8. 上传最终产物 ==================
     - name: 8. 上传最终产物
       if: always() && (inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot')
