@@ -335,8 +335,8 @@ jobs:
         echo "====== ✅ 最终产物打包完毕: ${KIT_NAME}.zip ======"
         ls -lh "${KIT_NAME}.zip"
 
-    # ================== 8. 上传最终产物 ==================
-    - 名称: 8. 上传最终产物
+    # ================== 8.上传最终产物 ==================
+    - 名称: 8.上传最终产物
       if: always() && (inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot')
       uses: actions/upload-artifact@v4
       使用:
