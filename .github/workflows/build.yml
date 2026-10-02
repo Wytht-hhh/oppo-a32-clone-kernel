@@ -1,25 +1,33 @@
-name: OPPO A32 全自动化内核编译与打包（兼容 C11/C12）
+name: OPPO A32 全自动编译内核并打包 (C11/C12兼容版)
 
 on:
   workflow_dispatch:
     inputs:
+      build_type:
+        description: '选择构建类型'
+        required: true
+        default: 'kernel_and_boot'
+        type: choice
+        options:
+          - kernel_only       # 仅编译内核（最快，适合只想提取内核的用户）
+          - kernel_and_boot   # 编译内核 + 打包 Boot 镜像（推荐，适合想要直接刷入的用户）
       root_choice:
         description: '选择 Root 方案'
         required: true
         default: 'magisk'
         type: choice
         options:
-          - magisk            # 编译普通内核 + 打包 + Magisk.apk（需手动修补）
-          - kernelsu          # 编译集成 KernelSU 的内核 + 打包 + KernelSU.apk
-          - none              # 只编译内核 + 打包，无 Root
+          - magisk            # 编译普通内核 + Magisk.apk（需手动修补Boot）
+          - kernelsu          # 编译集成KernelSU的内核 + KernelSU.apk（直接刷入即获Root）
+          - none              # 无Root，仅包含Droidspaces支持
       include_apk:
-        description: '是否打包 Droidspaces.apk 等工具以加快速度？'
+        description: '是否包含APK工具（Droidspaces等）'
         required: true
         default: 'yes'
         type: choice
         options:
-          - 'yes'
-          - 'no'
+          - 'yes'             # 包含APK（推荐，方便直接使用）
+          - 'no'              # 不包含APK（精简输出包，仅保留内核和镜像）
 
 env:
   GITHUB_REPO: Wytht-hhh/oppo-a32-clone-kernel
@@ -41,10 +49,11 @@ jobs:
         sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget
         sudo mkdir -p /lib/firmware
 
-    # ================== 3. 准备并合并配置文件 ==================
+    # ================== 3. 准备配置文件（支持 C12 的 config） ==================
     - name: 3. 准备并合并配置文件
       run: |
         echo "====== 🛠️ 准备内核配置文件 ======"
+        # 优先使用用户上传的 phone.config (若是C12提取的，会自动适配)
         if [ -f "factory_boot/phone.config" ]; then
           echo "✅ 检测到用户上传的 factory_boot/phone.config，正在使用..."
           cp factory_boot/phone.config config/phone.config
@@ -53,6 +62,7 @@ jobs:
         fi
 
         echo "====== 🔧 写入 Droidspaces 必需的配置 ======"
+        # 强制开启内核容器化所需的基本配置，保证 Droidspaces 能正常运行
         sed -i 's/# CONFIG_USER_NS is not set/CONFIG_USER_NS=y/g' config/phone.config
         echo "CONFIG_USER_NS=y" >> config/phone.config
         echo "CONFIG_PID_NS=y" >> config/phone.config
@@ -63,16 +73,16 @@ jobs:
         echo "CONFIG_CGROUP_DEVICE=y" >> config/phone.config
         echo "CONFIG_DEVTMPFS=y" >> config/phone.config
 
-    # ================== 4. 修复源码 Bug（关键步骤） ==================
-    - name: 4. 修复源码 Bug 以兼容 C12 配置
+    # ================== 4. 修复源码 Bug（解决C12配置引发的编译报错） ==================
+    - name: 4. 修复源码 Bug (C11/C12 兼容性补丁)
       run: |
         echo "====== 🔧 应用源码兼容性补丁 ======"
         cd ${{ env.KERNEL_SOURCE_DIR }}
 
         # ============================================================
         # 修复 1：ion 内存管理驱动的变量未声明 Bug
-        # C12 配置开启了内存统计，但 C11 源码中漏写了变量声明。
-        # 在文件开头强行插入变量定义，让编译器能找到它。
+        # 原因：C12 配置开启了内存统计，但 C11 源码中漏写了变量声明。
+        # 做法：在文件开头强行插入 extern 声明，让编译器找到变量。
         # ============================================================
         if [ -f "drivers/staging/android/ion/ion.c" ]; then
             sed -i '1i int ion_cnt_enable = 0;' drivers/staging/android/ion/ion.c
@@ -82,8 +92,8 @@ jobs:
 
         # ============================================================
         # 修复 2：uifirst 调度器不兼容 Bug
-        # C12 配置开启了该功能，但 C11 源码不完整，缺少结构体成员。
-        # 我们不需要这个功能，直接在 Makefile 中禁用整个目录的编译。
+        # 原因：C12 配置开启了该功能，但 C11 源码不完整，缺少结构体成员。
+        # 做法：我们不需要这个功能，直接在 Makefile 中禁用整个目录的编译。
         # ============================================================
         if [ -f "kernel/uifirst/Makefile" ]; then
             sed -i 's/obj-y/obj-/' kernel/uifirst/Makefile
@@ -118,8 +128,10 @@ jobs:
         chmod +x build_kernel.sh
         ./build_kernel.sh
 
-        echo "====== ✅ 验证配置 ======"
+        echo "====== ✅ 验证编译结果 ======"
+        # 检查 Droidspaces 相关配置是否成功开启
         grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_SECCOMP" .config || echo "⚠️ 部分配置未找到"
+        # 检查 KernelSU 是否集成成功
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           grep -q "CONFIG_KSU=y" .config && echo "✅ KernelSU 已集成" || echo "❌ KernelSU 集成失败"
         fi
@@ -128,15 +140,18 @@ jobs:
         mkdir -p ~/compiled_kernel
         cp ./build/arch/arm64/boot/Image.gz ~/compiled_kernel/Image.gz || { echo "❌ 未找到内核文件！"; exit 1; }
 
-    # ================== 6. 使用独立工具打包 ==================
+    # ================== 6. 打包 Boot 镜像（仅当选择 kernel_and_boot 时） ==================
     - name: 6. 打包 Boot 镜像
+      if: inputs.build_type == 'kernel_and_boot'
       run: |
         echo "====== 📦 准备打包工具 ======"
+        # 从仓库 tools 文件夹中提取我们之前放好的工具
         cp tools/unpackbootimg ./unpackbootimg
         cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
+        
         if ! file ./unpackbootimg | grep -q "ELF 64-bit LSB executable"; then
-          echo "❌ 工具架构错误！"
+          echo "❌ 错误：工具架构错误！"
           exit 1
         fi
 
@@ -149,7 +164,7 @@ jobs:
         ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
         cp ~/compiled_kernel/Image.gz bootimg_out/boot.img-kernel
 
-        echo "====== 📦 重新打包 ======"
+        echo "====== 📦 重新打包 Boot ======"
         cd bootimg_out
         CMDLINE=$(cat boot.img-cmdline); BASE=$(cat boot.img-base); PAGESIZE=$(cat boot.img-pagesize)
         KERNEL_OFFSET=$(cat boot.img-kernel_offset); RAMDISK_OFFSET=$(cat boot.img-ramdisk_offset)
@@ -157,6 +172,7 @@ jobs:
         DTB_OFFSET=$(cat boot.img-dtb_offset); OS_VERSION=$(cat boot.img-os_version)
         OS_PATCH_LEVEL=$(cat boot.img-os_patch_level); HEADER_VERSION=$(cat boot.img-header_version)
 
+        # 自动识别 ramdisk 格式
         RAMDISK_ARG=""; if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"; elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"; fi
         DTB_ARG=""; if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
         SECOND_ARG=""; if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
@@ -169,9 +185,9 @@ jobs:
                   --os_patch_level $OS_PATCH_LEVEL --header_version $HEADER_VERSION \
                   -o ../new-boot.img
         cd ..
-        [ -f "new-boot.img" ] && echo "✅ 打包成功！" || { echo "❌ 打包失败！"; exit 1; }
+        [ -f "new-boot.img" ] && echo "✅ Boot 镜像打包成功！" || { echo "❌ 打包失败！"; exit 1; }
 
-    # ================== 7. 准备最终产物 ==================
+    # ================== 7. 准备最终产物（按需附带APK） ==================
     - name: 7. 准备最终产物
       if: always()
       run: |
@@ -180,16 +196,18 @@ jobs:
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then KIT_NAME="A32-Kit-KernelSU"
         else KIT_NAME="A32-Kit-NoRoot"; fi
 
+        echo "====== 📦 构建最终产物: ${KIT_NAME}.zip ======"
         mkdir -p ~/final_release/boot ~/final_release/kernel ~/final_release/apk
 
-        # 1. 放入内核
+        # 1. 放入编译好的内核 (无论是否打包Boot，都要放内核)
         if [ -f ~/compiled_kernel/Image.gz ]; then cp ~/compiled_kernel/Image.gz ~/final_release/kernel/; fi
-        
-        # 2. 放入未修补的 boot 镜像
+
+        # 2. 放入未修补的 boot 镜像 (仅当选择了打包)
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
 
-        # 3. 按需下载 APK
+        # 3. 按需下载 APK 工具
         if [ "${{ inputs.include_apk }}" == "yes" ]; then
+          echo "====== 📥 下载 APK 工具 ======"
           if [ "$ROOT_CHOICE" == "magisk" ]; then
             wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Magisk.apk || true
           elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
@@ -197,32 +215,32 @@ jobs:
           fi
           wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
         else
-          echo "⏭️ 已跳过 APK 下载，加快输出速度。"
+          echo "⏭️ 已跳过 APK 下载，输出包中将不包含 APK 工具。"
         fi
 
-        # 4. 动态生成 README
+        # 4. 动态生成 README 说明文件
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 Linux Kit 使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
         echo "本压缩包由 GitHub Actions 自动构建。" >> ~/final_release/README.txt
-        echo "你选择的方案：$ROOT_CHOICE" >> ~/final_release/README.txt
+        echo "构建类型：${{ inputs.build_type }}，Root 方案：$ROOT_CHOICE" >> ~/final_release/README.txt
         echo "" >> ~/final_release/README.txt
 
         if [ "$ROOT_CHOICE" == "magisk" ]; then
-          echo "【包含文件】boot-unpatched.img（未修补镜像）、Image.gz、Magisk.apk、Droidspaces.apk" >> ~/final_release/README.txt
+          echo "【包含文件】boot/boot-unpatched.img（未修补镜像）、kernel/Image.gz、apk/Magisk.apk" >> ~/final_release/README.txt
           echo "【使用步骤】" >> ~/final_release/README.txt
-          echo "  1. 安装 Magisk.apk" >> ~/final_release/README.txt
-          echo "  2. 用 Magisk 修补 boot-unpatched.img" >> ~/final_release/README.txt
+          echo "  1. 安装 apk/Magisk.apk" >> ~/final_release/README.txt
+          echo "  2. 用 Magisk 修补 boot/boot-unpatched.img" >> ~/final_release/README.txt
           echo "  3. fastboot flash boot magisk_patched.img 刷入" >> ~/final_release/README.txt
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
-          echo "【包含文件】boot-unpatched.img（内核已集成KernelSU）、Image.gz、KernelSU.apk、Droidspaces.apk" >> ~/final_release/README.txt
+          echo "【包含文件】boot/boot-unpatched.img（内核已集成KernelSU）、kernel/Image.gz、apk/KernelSU.apk" >> ~/final_release/README.txt
           echo "【使用步骤】" >> ~/final_release/README.txt
-          echo "  1. fastboot flash boot boot-unpatched.img 刷入" >> ~/final_release/README.txt
-          echo "  2. 安装 KernelSU.apk" >> ~/final_release/README.txt
+          echo "  1. fastboot flash boot boot/boot-unpatched.img 刷入" >> ~/final_release/README.txt
+          echo "  2. 安装 apk/KernelSU.apk" >> ~/final_release/README.txt
         else
-          echo "【包含文件】boot-unpatched.img（无Root）、Image.gz" >> ~/final_release/README.txt
+          echo "【包含文件】boot/boot-unpatched.img（无Root）、kernel/Image.gz" >> ~/final_release/README.txt
           echo "【使用步骤】" >> ~/final_release/README.txt
-          echo "  1. fastboot flash boot boot-unpatched.img 刷入" >> ~/final_release/README.txt
+          echo "  1. fastboot flash boot boot/boot-unpatched.img 刷入" >> ~/final_release/README.txt
         fi
         echo "  最后安装 Droidspaces.apk 开始用 Linux。" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
