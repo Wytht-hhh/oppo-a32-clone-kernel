@@ -28,26 +28,35 @@ env:
 
 jobs:
   pack:
-    runs-on: ubuntu-20.04  # 关键改变：使用 Ubuntu 20.04，自带 cpio 2.12，完美兼容 AIK
+    runs-on: ubuntu-22.04  # 切回主力机器，避免排队
 
     steps:
     # ================== 1. 拉取仓库代码 ==================
     - name: 1. 拉取仓库代码
       uses: actions/checkout@v4
 
-    # ================== 2. 安装必要工具 ==================
-    - name: 2. 安装必要工具
+    # ================== 2. 安装工具并无副作用降级 cpio ==================
+    - name: 2. 安装必要工具并修复 cpio
       run: |
         sudo apt-get update
         sudo apt-get install -y wget unzip cpio gzip file
-        echo "====== 当前 cpio 版本： ======"
+        
+        echo "====== 🔧 修复 cpio 版本兼容性问题 ======"
+        # 下载 cpio 2.12，用 dpkg -x 仅解压不安装，避免依赖冲突
+        wget -q http://archive.ubuntu.com/ubuntu/pool/main/c/cpio/cpio_2.12-2ubuntu1_amd64.deb
+        dpkg -x cpio_2.12-2ubuntu1_amd64.deb ./cpio_2.12_bin
+        
+        # 将 2.12 版本的 bin 目录添加到 PATH 最前面，确保 AIK 优先调用它
+        echo "$(pwd)/cpio_2.12_bin/bin" >> $GITHUB_PATH
+        export PATH=$(pwd)/cpio_2.12_bin/bin:$PATH
+        
+        echo "当前生效的 cpio 版本："
         cpio --version
 
     # ================== 3. 下载并解压 AIK 工具 ==================
     - name: 3. 下载 AIK 打包工具
       run: |
         echo "====== 📦 从你的 Release 下载 AIK ======"
-        # 使用你提供的最新 AIK 链接
         AIK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/AIK-Linux-mirror/AIK-Linux-mirror-master.zip"
         wget -q "$AIK_URL" -O aik.zip
         if [ ! -s aik.zip ]; then
@@ -70,7 +79,6 @@ jobs:
     - name: 4. 下载原厂 boot.img
       run: |
         echo "====== 🧐 下载原厂 boot.img ======"
-        # 使用你提供的原厂 boot.img 真实链接
         BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
         wget -q "$BOOT_URL" -O boot.img
         if [ ! -s boot.img ]; then
@@ -86,15 +94,12 @@ jobs:
         echo "====== 🔍 验证内核文件: ${{ inputs.kernel_type }} ======"
         KERNEL_FILE="factory_boot/${{ inputs.kernel_type }}"
         
-        # 1. 检查文件是否存在
         if [ ! -f "$KERNEL_FILE" ]; then
           echo "❌ 错误：在 factory_boot 文件夹中未找到 ${{ inputs.kernel_type }}！"
-          echo "请确认你已将该内核文件上传到仓库的 factory_boot 目录下。"
           exit 1
         fi
         echo "✅ 文件存在，正在校验..."
 
-        # 2. 检查 KernelSU 标识（防止用户点错）
         if file "$KERNEL_FILE" | grep -q "gzip compressed data"; then
           gzip -dc "$KERNEL_FILE" > Image_check
         else
@@ -111,14 +116,12 @@ jobs:
         
         if [ "${{ inputs.kernel_type }}" == "Image.gz-ksu" ] && [ "$IS_KSU" == "no" ]; then
           echo "❌ 错误：你选择了 KernelSU 内核，但未检测到 KernelSU 符号！"
-          echo "请确认你上传的内核是否正确。"
           exit 1
         fi
         if [ "${{ inputs.kernel_type }}" == "Image.gz" ] && [ "$IS_KSU" == "yes" ]; then
           echo "⚠️ 提示：你选择的是普通内核，但检测到了 KernelSU 符号。"
         fi
 
-        # 3. 检查 Droidspaces 必须的配置
         if [ -f "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" ]; then
           chmod +x "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig"
           bash "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" Image_check > extracted_config 2>/dev/null || true
@@ -153,7 +156,6 @@ jobs:
         fi
 
         echo "====== 📦 重新打包生成 Boot 镜像 ======"
-        # 在 Ubuntu 20.04 上，cpio 是 2.12，AIK 会完美运行
         ./repackimg.sh || true
         
         if [ -f "image-new.img" ]; then
@@ -172,7 +174,6 @@ jobs:
       if: inputs.root_type == 'magisk'
       run: |
         echo "====== 📥 下载 Magisk APK ======"
-        # 使用你提供的 Alpha Magisk 真实链接
         MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk"
         wget -q "$MAGISK_URL" -O Magisk.apk
         if [ ! -s Magisk.apk ]; then
@@ -215,18 +216,14 @@ jobs:
         mkdir -p ~/final_release/kernel
         mkdir -p ~/final_release/apk
 
-        # 1. 放入内核
         if [ "${{ inputs.kernel_type }}" != "stock" ]; then
           cp factory_boot/${{ inputs.kernel_type }} ~/final_release/kernel/ || true
         fi
 
-        # 2. 放入未修补的 boot 镜像
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
 
-        # 3. 放入 Magisk 修补后的镜像
         if [ -f new-boot-magisk-patched.img ]; then cp new-boot-magisk-patched.img ~/final_release/boot/boot-magisk-patched.img; fi
 
-        # 4. 下载对应的 APK
         if [ "$ROOT_CHOICE" == "magisk" ]; then
           wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Alpha_v31000.apk || true
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
@@ -234,7 +231,6 @@ jobs:
         fi
         wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
 
-        # 5. 生成简易 README（根据选择动态说明）
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 打包镜像使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
