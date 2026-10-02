@@ -39,27 +39,25 @@ jobs:
     - name: 2. 安装基础工具
       run: |
         sudo apt-get update
-        sudo apt-get install -y wget unzip gzip file
+        sudo apt-get install -y wget unzip gzip file git
 
-    # ================== 3. 下载独立工具并赋予权限 ==================
-    - name: 3. 下载 unpackbootimg 和 mkbootimg
+    # ================== 3. 克隆 AIK 仓库并提取原生工具 ==================
+    - name: 3. 提取 unpackbootimg 和 mkbootimg
       run: |
-        echo "====== 📦 下载独立打包工具 ======"
-        # 直接从稳定的源下载这两个独立的二进制工具
-        wget -q "https://github.com/ravindu644/Droidspaces-OSS/raw/main/Droidspaces/tools/unpackbootimg" -O unpackbootimg
-        wget -q "https://github.com/ravindu644/Droidspaces-OSS/raw/main/Droidspaces/tools/mkbootimg" -O mkbootimg
+        echo "====== 📦 克隆 AIK 仓库并提取打包工具 ======"
+        # 直接克隆 osm0sis 的 AIK 仓库，这是最稳定、最纯净的源头
+        git clone --depth=1 https://github.com/osm0sis/AIK-Linux.git aikl
         
-        if [ ! -f "unpackbootimg" ] || [ ! -f "mkbootimg" ]; then
-          echo "❌ 工具下载失败，尝试从备用源下载..."
-          # 备用源：直接拉取 AOSP 的编译结果（这里用 osm0sis 的 AIK 中的二进制作为兜底）
-          wget -q "https://github.com/osm0sis/AIK-Linux/archive/refs/heads/master.zip" -O aik_master.zip
-          unzip -q aik_master.zip
-          cp AIK-Linux-master/bin/unpackbootimg ./unpackbootimg
-          cp AIK-Linux-master/bin/mkbootimg ./mkbootimg
-        fi
-        
+        # 从仓库的 bin 目录中提取出两个原生 Linux 工具
+        cp aikl/bin/unpackbootimg ./unpackbootimg
+        cp aikl/bin/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
-        echo "✅ 工具准备完毕"
+        
+        if [ ! -f "./unpackbootimg" ] || [ ! -f "./mkbootimg" ]; then
+          echo "❌ 工具提取失败！"
+          exit 1
+        fi
+        echo "✅ 工具提取成功"
 
     # ================== 4. 下载原厂 boot.img ==================
     - name: 4. 下载原厂 boot.img
@@ -131,7 +129,7 @@ jobs:
       run: |
         echo "====== 🔧 使用 unpackbootimg 解包原厂 boot.img ======"
         mkdir -p bootimg_out
-        # 直接使用当前目录下的可执行文件，绝对不会有 command not found
+        # 直接调用当前目录下的工具，绝不会有 command not found
         ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
 
         echo "====== 🔄 替换内核 ======"
@@ -163,7 +161,7 @@ jobs:
         SECOND_ARG=""
         if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
 
-        # 使用当前目录下的 mkbootimg
+        # 使用当前目录上一级的 mkbootimg
         ../mkbootimg --kernel boot.img-kernel \
                   --ramdisk boot.img-ramdisk.gz \
                   $SECOND_ARG \
