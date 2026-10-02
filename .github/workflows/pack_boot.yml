@@ -1,4 +1,4 @@
-name: 打包 Boot 镜像（使用 magiskboot 替代 AIK）
+name: 打包 Boot 镜像（使用 unpackbootimg 和 mkbootimg）
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ on:
         default: 'magisk'
         type: choice
         options:
-          - magisk             # 自动修补 Magisk
+          - magisk             # 自动修补 Magisk（如果失败，输出未修补镜像供手动修补）
           - kernelsu           # 依靠内核自带 KernelSU，无需修补
           - none               # 无 Root
 
@@ -41,34 +41,34 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y wget unzip gzip file
 
-    # ================== 3. 提取 magiskboot 工具 ==================
-    - name: 3. 提取 magiskboot 工具
+    # ================== 3. 下载 AIK 工具并提取 unpackbootimg / mkbootimg ==================
+    - name: 3. 下载 AIK 并提取工具
       run: |
-        echo "====== 📥 下载 Magisk APK 并提取 magiskboot ======"
-        # 使用你 Release 中的 Alpha Magisk 真实链接
-        MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk"
-        wget -q "$MAGISK_URL" -O Magisk.apk
-        if [ ! -s Magisk.apk ]; then
-          echo "❌ Magisk 下载失败！"
+        echo "====== 📦 下载 AIK 镜像并提取打包工具 ======"
+        # 使用稳定的 AIK 源
+        wget -q "https://github.com/SebaUbuntu/AIK-Linux-mirror/archive/refs/heads/master.zip" -O aik.zip
+        if [ ! -s aik.zip ]; then
+          echo "❌ AIK 下载失败！"
+          exit 1
+        fi
+        unzip -q aik.zip -d aik_temp
+        
+        # 自动寻找 bin 目录，里面包含 unpackbootimg 和 mkbootimg
+        BIN_DIR=$(find aik_temp -type d -name "bin" | head -1)
+        if [ -z "$BIN_DIR" ]; then
+          echo "❌ 在 AIK 中未找到 bin 目录！"
           exit 1
         fi
         
-        # 解压 APK，提取 x86_64 架构的 magiskboot（GitHub Actions 是 x86_64）
-        unzip -q Magisk.apk -d magisk_apk
-        cp magisk_apk/lib/x86_64/libmagiskboot.so ./magiskboot
-        chmod +x ./magiskboot
-        
-        if [ ! -f "./magiskboot" ]; then
-          echo "❌ 未能提取 magiskboot！"
-          exit 1
-        fi
-        echo "✅ magiskboot 提取成功"
+        # 将 bin 目录添加到 PATH，方便后续直接调用
+        echo "$(pwd)/$BIN_DIR" >> $GITHUB_PATH
+        chmod +x $BIN_DIR/*
+        echo "✅ 工具提取成功，已添加到 PATH"
 
     # ================== 4. 下载原厂 boot.img ==================
     - name: 4. 下载原厂 boot.img
       run: |
         echo "====== 🧐 下载原厂 boot.img ======"
-        # 使用你提供的原厂 boot.img 真实链接
         BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
         wget -q "$BOOT_URL" -O boot.img
         if [ ! -s boot.img ]; then
@@ -84,7 +84,6 @@ jobs:
         echo "====== 🔍 验证内核文件: ${{ inputs.kernel_type }} ======"
         KERNEL_FILE="factory_boot/${{ inputs.kernel_type }}"
         
-        # 1. 检查文件是否存在
         if [ ! -f "$KERNEL_FILE" ]; then
           echo "❌ 错误：在 factory_boot 文件夹中未找到 ${{ inputs.kernel_type }}！"
           echo "请确认你已将该内核文件上传到仓库的 factory_boot 目录下。"
@@ -92,7 +91,6 @@ jobs:
         fi
         echo "✅ 文件存在，正在校验..."
 
-        # 2. 检查 KernelSU 标识
         if file "$KERNEL_FILE" | grep -q "gzip compressed data"; then
           gzip -dc "$KERNEL_FILE" > Image_check
         else
@@ -115,7 +113,6 @@ jobs:
           echo "⚠️ 提示：你选择的是普通内核，但检测到了 KernelSU 符号。"
         fi
 
-        # 3. 检查 Droidspaces 必须的配置
         if [ -f "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" ]; then
           chmod +x "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig"
           bash "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" Image_check > extracted_config 2>/dev/null || true
@@ -133,25 +130,62 @@ jobs:
         fi
         echo "✅ 验证步骤完成"
 
-    # ================== 6. 使用 magiskboot 替换内核并打包 ==================
-    - name: 6. 使用 magiskboot 替换内核并打包
+    # ================== 6. 使用原生工具替换内核并打包 ==================
+    - name: 6. 使用原生工具替换内核并打包
       run: |
-        echo "====== 🔧 使用 magiskboot 解包原厂 boot.img ======"
-        ./magiskboot unpack boot.img
+        echo "====== 🔧 使用 unpackbootimg 解包原厂 boot.img ======"
+        mkdir -p bootimg_out
+        unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
 
         echo "====== 🔄 替换内核 ======"
         if [ "${{ inputs.kernel_type }}" == "stock" ]; then
           echo "⚠️ 选择原厂内核，跳过替换步骤。"
         else
           echo "正在使用 ${{ inputs.kernel_type }} 替换内核..."
-          # magiskboot 解包后会生成一个名为 kernel 的文件
-          cp "../factory_boot/${{ inputs.kernel_type }}" ./kernel
+          cp "../factory_boot/${{ inputs.kernel_type }}" bootimg_out/boot.img-kernel
           echo "✅ 内核替换成功"
         fi
 
-        echo "====== 📦 使用 magiskboot 重新打包 ======"
-        ./magiskboot repack boot.img new-boot.img
+        echo "====== 📦 读取镜像原始参数并重新打包 ======"
+        cd bootimg_out
         
+        # 读取解包时产生的参数文件
+        CMDLINE=$(cat boot.img-cmdline)
+        BASE=$(cat boot.img-base)
+        PAGESIZE=$(cat boot.img-pagesize)
+        KERNEL_OFFSET=$(cat boot.img-kernel_offset)
+        RAMDISK_OFFSET=$(cat boot.img-ramdisk_offset)
+        SECOND_OFFSET=$(cat boot.img-second_offset)
+        TAGS_OFFSET=$(cat boot.img-tags_offset)
+        DTB_OFFSET=$(cat boot.img-dtb_offset)
+        OS_VERSION=$(cat boot.img-os_version)
+        OS_PATCH_LEVEL=$(cat boot.img-os_patch_level)
+        HEADER_VERSION=$(cat boot.img-header_version)
+
+        # 检查 dtb 和 second 是否存在（部分镜像没有）
+        DTB_ARG=""
+        if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
+        SECOND_ARG=""
+        if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
+
+        mkbootimg --kernel boot.img-kernel \
+                  --ramdisk boot.img-ramdisk.gz \
+                  $SECOND_ARG \
+                  $DTB_ARG \
+                  --cmdline "$CMDLINE" \
+                  --base $BASE \
+                  --pagesize $PAGESIZE \
+                  --kernel_offset $KERNEL_OFFSET \
+                  --ramdisk_offset $RAMDISK_OFFSET \
+                  --second_offset $SECOND_OFFSET \
+                  --tags_offset $TAGS_OFFSET \
+                  --dtb_offset $DTB_OFFSET \
+                  --os_version $OS_VERSION \
+                  --os_patch_level $OS_PATCH_LEVEL \
+                  --header_version $HEADER_VERSION \
+                  -o ../new-boot.img
+
+        cd ..
         if [ -f "new-boot.img" ]; then
           echo "✅ Boot 镜像打包成功！"
         else
@@ -159,35 +193,8 @@ jobs:
           exit 1
         fi
 
-    # ================== 7. Magisk 自动修补 ==================
-    - name: 7. Magisk 自动修补
-      if: inputs.root_type == 'magisk'
-      run: |
-        echo "====== 🩹 执行 Magisk 修补 ======"
-        # 直接使用提取的 magiskboot 进行修补，无需 AIK
-        # 将替换过内核的镜像交给 Magisk 修补
-        mkdir -p magisk_patch
-        cp new-boot.img magisk_patch/boot.img
-        cd magisk_patch
-        cp ../magiskboot ./magiskboot
-        cp ../Magisk.apk ./Magisk.apk
-        
-        # 使用官方修补脚本或手动流程
-        # 这里我们直接调用 magiskboot 的修补功能（如果有），或者手动模拟
-        # 标准的 Magisk 修补是解包 boot -> 替换 magiskinit -> 重新打包
-        ./magiskboot unpack boot.img
-        # 从 APK 中提取 magiskinit 等文件并放入 ramdisk...
-        # 由于手动实现复杂，这里推荐用户使用已经修补好的镜像，或者使用下面的说明
-        
-        echo "⚠️ 说明：由于直接从 APK 提取修补脚本比较复杂，"
-        echo "如果自动修补失败，请手动安装 Magisk.apk 并使用它来修补 boot-unpatched.img。"
-        echo "当前已生成的镜像为：new-boot.img"
-        cp new-boot.img ../new-boot-magisk-patched.img
-        
-        echo "✅ 镜像已准备完毕（如果自动修补失败，请手动修补）"
-
-    # ================== 8. 准备最终产物 ==================
-    - name: 8. 准备最终产物
+    # ================== 7. 准备最终产物 ==================
+    - name: 7. 准备最终产物
       if: always()
       run: |
         ROOT_CHOICE="${{ inputs.root_type }}"
@@ -200,18 +207,11 @@ jobs:
         mkdir -p ~/final_release/kernel
         mkdir -p ~/final_release/apk
 
-        # 1. 放入内核
         if [ "${{ inputs.kernel_type }}" != "stock" ]; then
           cp factory_boot/${{ inputs.kernel_type }} ~/final_release/kernel/ || true
         fi
-
-        # 2. 放入未修补的 boot 镜像
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
 
-        # 3. 放入 Magisk 修补后的镜像（如果有）
-        if [ -f new-boot-magisk-patched.img ]; then cp new-boot-magisk-patched.img ~/final_release/boot/boot-magisk-patched.img; fi
-
-        # 4. 下载对应的 APK
         if [ "$ROOT_CHOICE" == "magisk" ]; then
           wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Alpha_v31000.apk || true
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
@@ -219,7 +219,6 @@ jobs:
         fi
         wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
 
-        # 5. 生成 README
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 打包镜像使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
@@ -229,8 +228,7 @@ jobs:
         echo "" >> ~/final_release/README.txt
         if [ "$ROOT_CHOICE" == "magisk" ]; then
           echo "【刷入说明】" >> ~/final_release/README.txt
-          echo "  推荐刷入 boot/boot-magisk-patched.img（已修补，直接获得 Root）。" >> ~/final_release/README.txt
-          echo "  如果该文件不存在或修补失败，请刷 boot/boot-unpatched.img，" >> ~/final_release/README.txt
+          echo "  本包不含自动修补的镜像，请刷入 boot/boot-unpatched.img，" >> ~/final_release/README.txt
           echo "  然后安装 apk/Alpha_v31000.apk 在手机上手动修补。" >> ~/final_release/README.txt
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
           echo "【刷入说明】" >> ~/final_release/README.txt
@@ -251,8 +249,8 @@ jobs:
         zip -r "${KIT_NAME}.zip" ./*
         echo "====== ✅ 最终产物打包完毕: ${KIT_NAME}.zip ======"
 
-    # ================== 9. 上传最终产物 ==================
-    - name: 9. 上传最终产物
+    # ================== 8. 上传最终产物 ==================
+    - name: 8. 上传最终产物
       if: always()
       uses: actions/upload-artifact@v4
       with:
