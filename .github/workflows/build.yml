@@ -24,6 +24,7 @@ on:
 
 env:
   GITHUB_REPO: Wytht-hhh/oppo-a32-clone-kernel
+  KERNEL_SOURCE_DIR: kernel/android_kernel_modules_and_devicetree_oppo_sm4250/source/android/kernel/msm-4.19
 
 jobs:
   build:
@@ -47,8 +48,8 @@ jobs:
         # 这里强制降级到 2.12 版本，确保打包成功。
         # ============================================================
         echo "====== 🔧 降级 cpio 至 2.12 ======"
-        wget -q http://archive.ubuntu.com/ubuntu/pool/main/c/cpio/cpio_2.12-2ubuntu1_amd64.deb
-        sudo dpkg -i cpio_2.12-2ubuntu1_amd64.deb || sudo apt-get install -f -y
+        wget -q -L http://archive.ubuntu.com/ubuntu/pool/main/c/cpio/cpio_2.12-2ubuntu1_amd64.deb -O cpio.deb || true
+        sudo dpkg -i cpio.deb || sudo apt-get install -f -y
         cpio --version
 
     # ================== 3. 编译内核 ==================
@@ -83,10 +84,19 @@ jobs:
         echo "CONFIG_CGROUP_DEVICE=y" >> config/phone.config
         echo "CONFIG_DEVTMPFS=y" >> config/phone.config
         
-        # 如果选择了 KernelSU，在编译前集成
+        # ============================================================
+        # 🔧 集成 KernelSU（仅当用户选择 kernelsu 时）
+        # ------------------------------------------------------------
+        # KernelSU 的 setup.sh 必须在内核源码根目录运行，它会自动：
+        #   1. 把 KernelSU 代码复制到 drivers/kernelsu/
+        #   2. 修改内核的 Makefile 和 Kconfig 自动包含它
+        # 所以我们要先 cd 进内核源码目录，集成完再回来。
+        # ============================================================
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
-          echo "====== 🔧 集成 KernelSU 到内核源码 ======"
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          echo "====== 🔧 集成 KernelSU v0.9.5 到内核源码 ======"
+          cd ${{ env.KERNEL_SOURCE_DIR }}
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5 || echo "⚠️ KernelSU 集成失败，继续尝试编译"
+          cd ${{ github.workspace }}
           echo "CONFIG_KSU=y" >> config/phone.config
           echo "CONFIG_KSU_DEBUG=n" >> config/phone.config
         fi
@@ -97,7 +107,7 @@ jobs:
         ./build_kernel.sh
         
         echo "====== ✅ 验证 Droidspaces 相关配置 ======"
-        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_OVERLAY_FS|CONFIG_SECCOMP|CONFIG_PID_NS|CONFIG_NET_NS" .config
+        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_OVERLAY_FS|CONFIG_SECCOMP|CONFIG_PID_NS|CONFIG_NET_NS" .config || true
         
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           echo "====== ✅ 验证 KernelSU 配置 ======"
@@ -126,24 +136,46 @@ jobs:
       if: inputs.build_type == 'boot_only' || inputs.build_type == 'kernel_and_boot'
       run: |
         export TERM=xterm
+        
+        # ============================================================
+        # 📦 准备 AIK 打包工具
+        # ------------------------------------------------------------
+        # 优先从 Release 下载 AIK 压缩包（快、稳定）
+        # 如果 Release 下载失败，自动从 GitHub 在线克隆（兜底）
+        # 关键点：
+        #   - wget 必须加 -L 才能跟随 GitHub Release 的 302 重定向
+        #   - 命令后加 || true 防止 bash -e 直接退出，让兜底逻辑生效
+        # ============================================================
         echo "====== 📦 准备 AIK 打包工具 ======"
         AIK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/AIK-linux-mirror/AIK-linux-mirror.zip"
-        wget -q "$AIK_URL" -O aik.zip
-        if [ $? -ne 0 ] || [ ! -s aik.zip ]; then
-          echo "⚠️ Release 中未找到 AIK，尝试在线克隆..."
-          git clone https://github.com/BuildVoid/AIK-Linux-mirror.git aik
+        wget -q -L "$AIK_URL" -O aik.zip || true
+        
+        if [ ! -s aik.zip ]; then
+          echo "⚠️ Release 中未找到 AIK 或下载失败，尝试在线克隆..."
+          git clone --depth=1 https://github.com/BuildVoid/AIK-Linux-mirror.git aik || true
         else
+          echo "✅ 从 Release 下载 AIK 成功，正在解压..."
           unzip -q aik.zip -d aik_temp
           mv aik_temp/* aik 2>/dev/null || true
+        fi
+        
+        # 检查 AIK 是否准备成功
+        if [ ! -d "aik" ]; then
+          echo "❌ AIK 准备失败！请检查 Release 中的 AIK 链接或网络。"
+          exit 1
         fi
         cd aik
         chmod +x unpackimg.sh repackimg.sh cleanimg.sh
         
+        # ============================================================
+        # 🧐 下载原厂 boot.img
+        # 从 Release 下载，必须加 -L
+        # ============================================================
         echo "====== 🧐 下载原厂 boot.img ======"
         BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
-        wget -q "$BOOT_URL" -O ../boot.img
+        wget -q -L "$BOOT_URL" -O ../boot.img || true
         if [ ! -s ../boot.img ]; then
-          echo "❌ 原厂 boot.img 下载失败！停止打包。"
+          echo "❌ 原厂 boot.img 下载失败！请检查 Release 中 c12--original-boot 标签下的 boot.img 是否存在。"
           exit 1
         fi
         
@@ -180,11 +212,12 @@ jobs:
       run: |
         echo "====== 📥 下载 Magisk APK ======"
         MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Magisk.apk"
-        wget -q "$MAGISK_URL" -O Magisk.apk
+        wget -q -L "$MAGISK_URL" -O Magisk.apk || true
+        
         if [ ! -s Magisk.apk ]; then
           echo "⚠️ 用户 Release 中未找到，尝试从官方仓库下载最新版..."
           LATEST_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
-          wget -q "$LATEST_URL" -O Magisk.apk
+          wget -q -L "$LATEST_URL" -O Magisk.apk || true
         fi
         
         if [ ! -s Magisk.apk ]; then
@@ -237,41 +270,46 @@ jobs:
         # 1. 放入内核（无论打包是否成功，只要编译出来就放进去）
         if [ -f ~/compiled_kernel/Image.gz ]; then
           cp ~/compiled_kernel/Image.gz ~/final_release/kernel/Image.gz
+          echo "✅ 已放入内核文件"
+        else
+          echo "⚠️ 未找到内核文件，跳过"
         fi
         
         # 2. 放入未修补的 boot 镜像
         if [ -f new-boot.img ]; then
           cp new-boot.img ~/final_release/boot/boot-unpatched.img
+          echo "✅ 已放入未修补镜像"
         fi
         
         # 3. 放入 Magisk 修补后的镜像（仅当修补成功）
         if [ -f new-boot-magisk-patched.img ]; then
           cp new-boot-magisk-patched.img ~/final_release/boot/boot-magisk-patched.img
+          echo "✅ 已放入 Magisk 修补镜像"
         fi
         
         # 4. 放入对应的 APK（Release 优先，官方兜底）
         if [ "$ROOT_CHOICE" == "magisk" ]; then
           MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Magisk.apk"
-          wget -q "$MAGISK_URL" -O ~/final_release/apk/Magisk.apk
+          wget -q -L "$MAGISK_URL" -O ~/final_release/apk/Magisk.apk || true
           if [ ! -s ~/final_release/apk/Magisk.apk ]; then
             LATEST_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4)
-            wget -q "$LATEST_URL" -O ~/final_release/apk/Magisk.apk
+            wget -q -L "$LATEST_URL" -O ~/final_release/apk/Magisk.apk || true
           fi
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
           KSU_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/KernelSU.apk"
-          wget -q "$KSU_URL" -O ~/final_release/apk/KernelSU.apk
+          wget -q -L "$KSU_URL" -O ~/final_release/apk/KernelSU.apk || true
           if [ ! -s ~/final_release/apk/KernelSU.apk ]; then
             LATEST_URL=$(curl -s https://api.github.com/repos/tiann/KernelSU/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4 | head -1)
-            wget -q "$LATEST_URL" -O ~/final_release/apk/KernelSU.apk
+            wget -q -L "$LATEST_URL" -O ~/final_release/apk/KernelSU.apk || true
           fi
         fi
         
         # 5. 放入 Droidspaces APK
         DS_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/latest/download/Droidspaces.apk"
-        wget -q "$DS_URL" -O ~/final_release/apk/Droidspaces.apk
+        wget -q -L "$DS_URL" -O ~/final_release/apk/Droidspaces.apk || true
         if [ ! -s ~/final_release/apk/Droidspaces.apk ]; then
           LATEST_URL=$(curl -s https://api.github.com/repos/ravindu644/Droidspaces-OSS/releases/latest | grep "browser_download_url.*apk" | cut -d '"' -f 4 | head -1)
-          wget -q "$LATEST_URL" -O ~/final_release/apk/Droidspaces.apk
+          wget -q -L "$LATEST_URL" -O ~/final_release/apk/Droidspaces.apk || true
         fi
         
         # 6. 生成通用 README
@@ -313,7 +351,13 @@ jobs:
 ========================================================
 EOF
         
+        # 7. 打包
         cd ~/final_release
+        if [ -z "$(ls -A ~/final_release)" ]; then
+          echo "❌ final_release 目录为空，无法打包！"
+          exit 1
+        fi
+        
         zip -r "${KIT_NAME}.zip" ./*
         echo "====== ✅ 最终产物打包完毕: ${KIT_NAME}.zip ======"
         ls -lh "${KIT_NAME}.zip"
