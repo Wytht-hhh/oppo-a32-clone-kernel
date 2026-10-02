@@ -28,41 +28,40 @@ env:
 
 jobs:
   pack:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04  # 关键改变：使用 Ubuntu 20.04，自带 cpio 2.12，完美兼容 AIK
 
     steps:
     # ================== 1. 拉取仓库代码 ==================
     - name: 1. 拉取仓库代码
       uses: actions/checkout@v4
 
-    # ================== 2. 安装必要工具并降级 cpio ==================
-    - name: 2. 安装必要工具并修复 cpio
+    # ================== 2. 安装必要工具 ==================
+    - name: 2. 安装必要工具
       run: |
         sudo apt-get update
         sudo apt-get install -y wget unzip cpio gzip file
-        
-        # 修复 AIK 打包问题：手动下载 cpio 2.12 并解压使用，不碰系统依赖
-        echo "====== 🔧 修复 cpio 版本兼容性问题 ======"
-        wget -q http://archive.ubuntu.com/ubuntu/pool/main/c/cpio/cpio_2.12-2ubuntu1_amd64.deb
-        dpkg -x cpio_2.12-2ubuntu1_amd64.deb ./cpio_2.12_bin
-        # 将 cpio 2.12 的路径添加到 PATH 最前面，强制优先使用它
-        echo "$(pwd)/cpio_2.12_bin/bin" >> $GITHUB_PATH
-        export PATH=$(pwd)/cpio_2.12_bin/bin:$PATH
-        echo "当前生效的 cpio 版本："
+        echo "====== 当前 cpio 版本： ======"
         cpio --version
 
     # ================== 3. 下载并解压 AIK 工具 ==================
     - name: 3. 下载 AIK 打包工具
       run: |
-        echo "====== 📦 从 SebaUbuntu 下载 AIK ======"
-        wget -q "https://github.com/SebaUbuntu/AIK-Linux-mirror/archive/refs/heads/master.zip" -O aik.zip
-        unzip -q aik.zip -d aik_temp
-        AIK_DIR=$(find aik_temp -name "unpackimg.sh" -type f -exec dirname {} \; | head -1)
-        if [ -z "$AIK_DIR" ]; then
-          echo "❌ 在 AIK 压缩包中未找到 unpackimg.sh！"
+        echo "====== 📦 从你的 Release 下载 AIK ======"
+        # 使用你提供的最新 AIK 链接
+        AIK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/AIK-Linux-mirror/AIK-Linux-mirror-master.zip"
+        wget -q "$AIK_URL" -O aik.zip
+        if [ ! -s aik.zip ]; then
+          echo "❌ 从 Release 下载 AIK 失败，尝试在线克隆备选..."
+          git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux-mirror.git aik
+        else
+          unzip -q aik.zip -d aik_temp
+          AIK_DIR=$(find aik_temp -name "unpackimg.sh" -type f -exec dirname {} \; | head -1)
+          mv "$AIK_DIR" aik
+        fi
+        if [ ! -f "aik/unpackimg.sh" ]; then
+          echo "❌ AIK 准备失败，未找到 unpackimg.sh！"
           exit 1
         fi
-        mv "$AIK_DIR" aik
         cd aik
         chmod +x unpackimg.sh repackimg.sh
         echo "✅ AIK 准备完毕"
@@ -71,6 +70,7 @@ jobs:
     - name: 4. 下载原厂 boot.img
       run: |
         echo "====== 🧐 下载原厂 boot.img ======"
+        # 使用你提供的原厂 boot.img 真实链接
         BOOT_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img"
         wget -q "$BOOT_URL" -O boot.img
         if [ ! -s boot.img ]; then
@@ -94,8 +94,7 @@ jobs:
         fi
         echo "✅ 文件存在，正在校验..."
 
-        # 2. 检查 KernelSU 标识
-        # 解压内核以便搜索字符串
+        # 2. 检查 KernelSU 标识（防止用户点错）
         if file "$KERNEL_FILE" | grep -q "gzip compressed data"; then
           gzip -dc "$KERNEL_FILE" > Image_check
         else
@@ -154,7 +153,7 @@ jobs:
         fi
 
         echo "====== 📦 重新打包生成 Boot 镜像 ======"
-        # 注意：这里使用修复后的 cpio 2.12 执行打包
+        # 在 Ubuntu 20.04 上，cpio 是 2.12，AIK 会完美运行
         ./repackimg.sh || true
         
         if [ -f "image-new.img" ]; then
@@ -165,7 +164,6 @@ jobs:
           echo "✅ Boot 镜像打包成功！"
         else
           echo "❌ 打包失败，未找到生成的镜像文件！"
-          echo "💡 请检查日志中是否有 cpio 报错信息。"
           exit 1
         fi
 
@@ -174,6 +172,7 @@ jobs:
       if: inputs.root_type == 'magisk'
       run: |
         echo "====== 📥 下载 Magisk APK ======"
+        # 使用你提供的 Alpha Magisk 真实链接
         MAGISK_URL="https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk"
         wget -q "$MAGISK_URL" -O Magisk.apk
         if [ ! -s Magisk.apk ]; then
@@ -235,7 +234,7 @@ jobs:
         fi
         wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
 
-        # 5. 生成简易 README
+        # 5. 生成简易 README（根据选择动态说明）
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 打包镜像使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
@@ -260,6 +259,7 @@ jobs:
         echo "" >> ~/final_release/README.txt
         echo "【Droidspaces 说明】" >> ~/final_release/README.txt
         echo "  安装 apk/Droidspaces.apk 并授予 Root 权限即可使用。" >> ~/final_release/README.txt
+        echo "  如果需要完整的 Linux 桌面，请在 App 内下载 Debian RootFS。" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
 
         cd ~/final_release
