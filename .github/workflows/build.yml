@@ -89,7 +89,15 @@ jobs:
         echo "CONFIG_MEMCG=y" >> config/phone.config
         echo "CONFIG_CGROUP_DEVICE=y" >> config/phone.config
         echo "CONFIG_DEVTMPFS=y" >> config/phone.config
-
+        # ============================================================
+        # 🔧 修复：禁用引起编译报错的 OPLUS UIFIRST 功能
+        # ============================================================
+        echo "====== 🔧 禁用导致编译失败的 UIFIRST 功能 ======"
+        # 1. 移除可能存在的开启项
+        sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' config/phone.config
+        # 2. 强制在文件末尾追加关闭指令（覆盖之前的配置）
+        echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> config/phone.config
+        echo "✅ UIFIRST 功能已禁用，避免编译报错"
     # ================== 5. 编译内核 ==================
     - name: 5. 编译内核
       run: |
