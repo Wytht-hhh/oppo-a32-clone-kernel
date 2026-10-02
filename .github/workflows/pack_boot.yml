@@ -35,11 +35,21 @@ jobs:
     - name: 1. 拉取仓库代码
       uses: actions/checkout@v4
 
-    # ================== 2. 安装必要工具 ==================
-    - name: 2. 安装必要工具
+    # ================== 2. 安装必要工具并降级 cpio ==================
+    - name: 2. 安装必要工具并修复 cpio
       run: |
         sudo apt-get update
         sudo apt-get install -y wget unzip cpio gzip file
+        
+        # 修复 AIK 打包问题：手动下载 cpio 2.12 并解压使用，不碰系统依赖
+        echo "====== 🔧 修复 cpio 版本兼容性问题 ======"
+        wget -q http://archive.ubuntu.com/ubuntu/pool/main/c/cpio/cpio_2.12-2ubuntu1_amd64.deb
+        dpkg -x cpio_2.12-2ubuntu1_amd64.deb ./cpio_2.12_bin
+        # 将 cpio 2.12 的路径添加到 PATH 最前面，强制优先使用它
+        echo "$(pwd)/cpio_2.12_bin/bin" >> $GITHUB_PATH
+        export PATH=$(pwd)/cpio_2.12_bin/bin:$PATH
+        echo "当前生效的 cpio 版本："
+        cpio --version
 
     # ================== 3. 下载并解压 AIK 工具 ==================
     - name: 3. 下载 AIK 打包工具
@@ -69,7 +79,7 @@ jobs:
         fi
         echo "✅ 原厂 boot.img 下载成功"
 
-    # ================== 5. 验证内核配置（新增） ==================
+    # ================== 5. 验证内核配置（防呆机制） ==================
     - name: 5. 验证内核配置
       if: inputs.kernel_type != 'stock'
       run: |
@@ -85,7 +95,7 @@ jobs:
         echo "✅ 文件存在，正在校验..."
 
         # 2. 检查 KernelSU 标识
-        # 先将压缩的内核解压以便搜索（不写回文件，用管道）
+        # 解压内核以便搜索字符串
         if file "$KERNEL_FILE" | grep -q "gzip compressed data"; then
           gzip -dc "$KERNEL_FILE" > Image_check
         else
@@ -102,14 +112,14 @@ jobs:
         
         if [ "${{ inputs.kernel_type }}" == "Image.gz-ksu" ] && [ "$IS_KSU" == "no" ]; then
           echo "❌ 错误：你选择了 KernelSU 内核，但未检测到 KernelSU 符号！"
-          echo "请确认你上传的内核是否正确，或者是否真的集成了 KernelSU。"
+          echo "请确认你上传的内核是否正确。"
           exit 1
         fi
         if [ "${{ inputs.kernel_type }}" == "Image.gz" ] && [ "$IS_KSU" == "yes" ]; then
-          echo "⚠️ 提示：你选择的是普通内核，但检测到了 KernelSU 符号。这可能是包含 KernelSU 的镜像。"
+          echo "⚠️ 提示：你选择的是普通内核，但检测到了 KernelSU 符号。"
         fi
 
-        # 3. 检查 Droidspaces 必须的配置（CONFIG_USER_NS）
+        # 3. 检查 Droidspaces 必须的配置
         if [ -f "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" ]; then
           chmod +x "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig"
           bash "${{ env.KERNEL_SOURCE_DIR }}/scripts/extract-ikconfig" Image_check > extracted_config 2>/dev/null || true
@@ -121,7 +131,6 @@ jobs:
             fi
           else
             echo "⚠️ 无法从内核镜像中提取配置（可能未开启 CONFIG_IKCONFIG）。"
-            echo "请确保你编译时已经正确开启了 Droidspaces 所需的配置项。"
           fi
         else
           echo "⚠️ 未找到 extract-ikconfig 工具，跳过 Droidspaces 配置验证。"
@@ -145,7 +154,9 @@ jobs:
         fi
 
         echo "====== 📦 重新打包生成 Boot 镜像 ======"
+        # 注意：这里使用修复后的 cpio 2.12 执行打包
         ./repackimg.sh || true
+        
         if [ -f "image-new.img" ]; then
           mv image-new.img ../new-boot.img
           echo "✅ Boot 镜像打包成功！"
@@ -154,6 +165,7 @@ jobs:
           echo "✅ Boot 镜像打包成功！"
         else
           echo "❌ 打包失败，未找到生成的镜像文件！"
+          echo "💡 请检查日志中是否有 cpio 报错信息。"
           exit 1
         fi
 
@@ -248,7 +260,6 @@ jobs:
         echo "" >> ~/final_release/README.txt
         echo "【Droidspaces 说明】" >> ~/final_release/README.txt
         echo "  安装 apk/Droidspaces.apk 并授予 Root 权限即可使用。" >> ~/final_release/README.txt
-        echo "  如果需要完整的 Linux 桌面，请在 App 内下载 Debian RootFS。" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
 
         cd ~/final_release
