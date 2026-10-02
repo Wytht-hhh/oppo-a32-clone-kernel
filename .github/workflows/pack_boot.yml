@@ -45,29 +45,19 @@ jobs:
     - name: 3. 从仓库提取 unpackbootimg 和 mkbootimg
       run: |
         echo "====== 📦 从仓库提取 unpackbootimg 和 mkbootimg ======"
-        
-        # 检查仓库中是否存在工具文件
         if [ ! -f "tools/unpackbootimg" ] || [ ! -f "tools/mkbootimg" ]; then
           echo "❌ 错误：在仓库 tools 文件夹中未找到 unpackbootimg 或 mkbootimg！"
-          echo "请确保你已将它们正确上传到仓库的 tools 目录下。"
           exit 1
         fi
-        
         cp tools/unpackbootimg ./unpackbootimg
         cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
-        
-        echo "====== 🔍 验证工具架构 ======"
         file ./unpackbootimg
-        file ./mkbootimg
-        
-        # 关键检查：确保它是 x86-64 架构的 ELF 可执行文件
         if ! file ./unpackbootimg | grep -q "ELF 64-bit LSB executable"; then
           echo "❌ 错误：仓库中的 unpackbootimg 不是有效的 x86_64 可执行文件！"
-          echo "请重新上传正确的文件（不要上传文本或 ARM 架构的文件）。"
           exit 1
         fi
-        echo "✅ 工具提取成功，架构验证通过"
+        echo "✅ 工具提取成功"
 
     # ================== 4. 下载原厂 boot.img ==================
     - name: 4. 下载原厂 boot.img
@@ -90,7 +80,7 @@ jobs:
         
         if [ ! -f "$KERNEL_FILE" ]; then
           echo "❌ 错误：在 factory_boot 文件夹中未找到 ${{ inputs.kernel_type }}！"
-          echo "请确认你已将该内核文件上传到仓库的 factory_boot 目录下。"
+          echo "请确认你已将该内核文件上传到仓库的 factory_boot 目录下，且文件名完全一致。"
           exit 1
         fi
         echo "✅ 文件存在，正在校验..."
@@ -139,15 +129,22 @@ jobs:
       run: |
         echo "====== 🔧 使用 unpackbootimg 解包原厂 boot.img ======"
         mkdir -p bootimg_out
-        # 运行 x86_64 原生工具解包
         ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ 解包失败！"; exit 1; }
 
         echo "====== 🔄 替换内核 ======"
         if [ "${{ inputs.kernel_type }}" == "stock" ]; then
           echo "⚠️ 选择原厂内核，跳过替换步骤。"
         else
-          echo "正在使用 ${{ inputs.kernel_type }} 替换内核..."
-          cp "../factory_boot/${{ inputs.kernel_type }}" bootimg_out/boot.img-kernel
+          # 绝对路径检查，避免路径错位
+          KERNEL_SRC="$(pwd)/factory_boot/${{ inputs.kernel_type }}"
+          if [ ! -f "$KERNEL_SRC" ]; then
+            echo "❌ 错误：找不到内核文件 $KERNEL_SRC"
+            echo "当前工作目录: $(pwd)"
+            echo "factory_boot 目录内容:"
+            ls -la $(pwd)/factory_boot/ || true
+            exit 1
+          fi
+          cp "$KERNEL_SRC" bootimg_out/boot.img-kernel
           echo "✅ 内核替换成功"
         fi
 
@@ -166,7 +163,6 @@ jobs:
         OS_PATCH_LEVEL=$(cat boot.img-os_patch_level)
         HEADER_VERSION=$(cat boot.img-header_version)
 
-        # 自动识别 ramdisk 文件名（可能是 .gz 或未压缩）
         RAMDISK_ARG=""
         if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"
         elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"
@@ -177,7 +173,6 @@ jobs:
         SECOND_ARG=""
         if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
 
-        # 使用 x86_64 原生 mkbootimg 重新打包
         ../mkbootimg --kernel boot.img-kernel \
                   $RAMDISK_ARG \
                   $SECOND_ARG \
