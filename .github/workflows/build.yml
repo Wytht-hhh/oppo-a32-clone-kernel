@@ -53,7 +53,6 @@ jobs:
     - name: 3. 准备并合并配置文件
       run: |
         echo "====== 🛠️ 准备内核配置文件 ======"
-        # 优先使用用户上传的 phone.config (若是C12提取的，会自动适配)
         if [ -f "factory_boot/phone.config" ]; then
           echo "✅ 检测到用户上传的 factory_boot/phone.config，正在使用..."
           cp factory_boot/phone.config config/phone.config
@@ -62,7 +61,6 @@ jobs:
         fi
 
         echo "====== 🔧 写入 Droidspaces 必需的配置 ======"
-        # 强制开启内核容器化所需的基本配置，保证 Droidspaces 能正常运行
         sed -i 's/# CONFIG_USER_NS is not set/CONFIG_USER_NS=y/g' config/phone.config
         echo "CONFIG_USER_NS=y" >> config/phone.config
         echo "CONFIG_PID_NS=y" >> config/phone.config
@@ -77,37 +75,32 @@ jobs:
     - name: 4. 修复源码 Bug (C11/C12 兼容性补丁)
       run: |
         echo "====== 🔧 应用源码兼容性补丁 ======"
-        
-        # 1. 进入内核源码目录，修补源码文件
         cd ${{ env.KERNEL_SOURCE_DIR }}
 
-        # ============================================================
         # 修复 1：ion 内存管理驱动的变量未声明 Bug
-        # 原因：C12 配置开启了内存统计，但 C11 源码中漏写了变量声明。
-        # 做法：在文件开头强行插入 extern 声明，让编译器找到变量。
-        # ============================================================
+        # 在文件开头插入 include 和变量定义
         if [ -f "drivers/staging/android/ion/ion.c" ]; then
-            sed -i '1i int ion_cnt_enable = 0;' drivers/staging/android/ion/ion.c
+            sed -i '1i #include <linux/atomic.h>' drivers/staging/android/ion/ion.c
             sed -i '1i atomic_long_t ion_total_size = ATOMIC_INIT(0);' drivers/staging/android/ion/ion.c
-            echo "✅ 已修复 ion.c 变量未定义问题"
+            sed -i '1i int ion_cnt_enable = 0;' drivers/staging/android/ion/ion.c
+            echo "✅ 已修复 ion.c (含头文件和变量定义)"
         fi
 
-        # ============================================================
-        # 修复 2：uifirst 调度器不兼容 Bug
-        # 原因：C12 配置开启了该功能，但 C11 源码不完整，缺少结构体成员。
-        # 做法：我们不需要这个功能，直接在 Makefile 中禁用整个目录的编译。
-        # ============================================================
+        # 修复 2：fs/sync.c 中 fsync_time 未声明 Bug
+        if [ -f "fs/sync.c" ]; then
+            sed -i '1i unsigned long fsync_time;' fs/sync.c
+            echo "✅ 已修复 fs/sync.c (声明 fsync_time)"
+        fi
+
+        # 修复 3：uifirst 调度器不兼容 Bug
+        # 3.1 修改 Makefile 禁用整个目录
         if [ -f "kernel/uifirst/Makefile" ]; then
             sed -i 's/obj-y/obj-/' kernel/uifirst/Makefile
             echo "✅ 已在 Makefile 中禁用 uifirst 编译"
         fi
 
-        # ============================================================
-        # 2. 关键修复：打完源码补丁后，切回仓库根目录，修改 config 文件
-        # 原因：源码目录层级太深，直接相对路径会找不到根目录的 config 文件夹
-        # ============================================================
+        # 3.2 从配置层面彻底关闭 UIFIRST 功能
         cd ${{ github.workspace }}
-        echo "====== 🔧 从根目录修改配置文件 ======"
         sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' config/phone.config
         echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> config/phone.config
         echo "✅ 已在配置文件中禁用 UIFIRST"
@@ -118,7 +111,6 @@ jobs:
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
-        # 如果选择了 KernelSU，先集成源码
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           echo "====== 🔧 集成 KernelSU v0.9.5 ======"
           cd ${{ env.KERNEL_SOURCE_DIR }}
@@ -134,9 +126,7 @@ jobs:
         ./build_kernel.sh
 
         echo "====== ✅ 验证编译结果 ======"
-        # 检查 Droidspaces 相关配置是否成功开启
         grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_SECCOMP" .config || echo "⚠️ 部分配置未找到"
-        # 检查 KernelSU 是否集成成功
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           grep -q "CONFIG_KSU=y" .config && echo "✅ KernelSU 已集成" || echo "❌ KernelSU 集成失败"
         fi
@@ -150,13 +140,11 @@ jobs:
       if: inputs.build_type == 'kernel_and_boot'
       run: |
         echo "====== 📦 准备打包工具 ======"
-        # 从仓库 tools 文件夹中提取我们之前放好的工具
         cp tools/unpackbootimg ./unpackbootimg
         cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
-        
         if ! file ./unpackbootimg | grep -q "ELF 64-bit LSB executable"; then
-          echo "❌ 错误：工具架构错误！"
+          echo "❌ 工具架构错误！"
           exit 1
         fi
 
@@ -177,7 +165,6 @@ jobs:
         DTB_OFFSET=$(cat boot.img-dtb_offset); OS_VERSION=$(cat boot.img-os_version)
         OS_PATCH_LEVEL=$(cat boot.img-os_patch_level); HEADER_VERSION=$(cat boot.img-header_version)
 
-        # 自动识别 ramdisk 格式
         RAMDISK_ARG=""; if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"; elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"; fi
         DTB_ARG=""; if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
         SECOND_ARG=""; if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
@@ -204,13 +191,9 @@ jobs:
         echo "====== 📦 构建最终产物: ${KIT_NAME}.zip ======"
         mkdir -p ~/final_release/boot ~/final_release/kernel ~/final_release/apk
 
-        # 1. 放入编译好的内核 (无论是否打包Boot，都要放内核)
         if [ -f ~/compiled_kernel/Image.gz ]; then cp ~/compiled_kernel/Image.gz ~/final_release/kernel/; fi
-
-        # 2. 放入未修补的 boot 镜像 (仅当选择了打包)
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
 
-        # 3. 按需下载 APK 工具
         if [ "${{ inputs.include_apk }}" == "yes" ]; then
           echo "====== 📥 下载 APK 工具 ======"
           if [ "$ROOT_CHOICE" == "magisk" ]; then
@@ -223,7 +206,6 @@ jobs:
           echo "⏭️ 已跳过 APK 下载，输出包中将不包含 APK 工具。"
         fi
 
-        # 4. 动态生成 README 说明文件
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 Linux Kit 使用说明" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
