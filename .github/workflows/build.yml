@@ -78,12 +78,16 @@ jobs:
         cd ${{ env.KERNEL_SOURCE_DIR }}
 
         # 修复 1：ion 内存管理驱动的变量未声明 Bug
-        # 在文件开头插入 include 和变量定义
+        # 使用 cat 写入临时文件，确保 #include 在变量定义之前！
         if [ -f "drivers/staging/android/ion/ion.c" ]; then
-            sed -i '1i #include <linux/atomic.h>' drivers/staging/android/ion/ion.c
-            sed -i '1i atomic_long_t ion_total_size = ATOMIC_INIT(0);' drivers/staging/android/ion/ion.c
-            sed -i '1i int ion_cnt_enable = 0;' drivers/staging/android/ion/ion.c
-            echo "✅ 已修复 ion.c (含头文件和变量定义)"
+            cat > /tmp/ion_header.txt << 'EOF'
+        #include <linux/atomic.h>
+        int ion_cnt_enable = 0;
+        atomic_long_t ion_total_size = ATOMIC_INIT(0);
+        EOF
+            cat /tmp/ion_header.txt drivers/staging/android/ion/ion.c > drivers/staging/android/ion/ion.c.tmp
+            mv drivers/staging/android/ion/ion.c.tmp drivers/staging/android/ion/ion.c
+            echo "✅ 已修复 ion.c (含头文件和变量定义，顺序正确)"
         fi
 
         # 修复 2：fs/sync.c 中 fsync_time 未声明 Bug
@@ -99,7 +103,14 @@ jobs:
             echo "✅ 已在 Makefile 中禁用 uifirst 编译"
         fi
 
-        # 3.2 从配置层面彻底关闭 UIFIRST 功能
+        # 3.2 给 uifirst 头文件套上 ifdef，防止被 fork.c 强行包含时找不到结构体成员
+        if [ -f "include/linux/uifirst/uifirst_sched_fork.h" ]; then
+            sed -i '1i #ifdef CONFIG_OPLUS_FEATURE_UIFIRST' include/linux/uifirst/uifirst_sched_fork.h
+            echo '#endif' >> include/linux/uifirst/uifirst_sched_fork.h
+            echo "✅ 已给 uifirst_sched_fork.h 加上 ifdef 防护"
+        fi
+
+        # 3.3 从配置层面彻底关闭 UIFIRST 功能
         cd ${{ github.workspace }}
         sed -i 's/CONFIG_OPLUS_FEATURE_UIFIRST=y/# CONFIG_OPLUS_FEATURE_UIFIRST is not set/g' config/phone.config
         echo "# CONFIG_OPLUS_FEATURE_UIFIRST is not set" >> config/phone.config
