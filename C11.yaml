@@ -1,0 +1,222 @@
+name: C11_Kernel_and_Boot_Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Select build type'
+        required: true
+        default: 'kernel_and_boot'
+        type: choice
+        options:
+          - kernel_only       # Only compile kernel
+          - kernel_and_boot   # Compile and pack boot.img
+      root_choice:
+        description: 'Select Root solution'
+        required: true
+        default: 'kernelsu'
+        type: choice
+        options:
+          - kernelsu          # Integrate KernelSU into kernel
+          - magisk            # Normal kernel (use Magisk later)
+          - none              # No root
+      include_apk:
+        description: 'Include APK tools (Droidspaces etc.)'
+        required: true
+        default: 'yes'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+
+env:
+  GITHUB_REPO: Wytht-hhh/oppo-a32-clone-kernel
+  KERNEL_SOURCE_DIR: kernel/android_kernel_modules_and_devicetree_oppo_sm4250/source/android/kernel/msm-4.19
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    # ================== 1. Checkout Code ==================
+    - name: 1. Checkout Code
+      uses: actions/checkout@v4
+
+    # ================== 2. Install Dependencies ==================
+    - name: 2. Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget openssl
+        sudo mkdir -p /lib/firmware
+
+    # ================== 3. Prepare Config (C11) ==================
+    - name: 3. Prepare Config File
+      run: |
+        echo "====== 🛠️ Preparing C11 Kernel Config ======"
+        # Use the user-uploaded config if exists, otherwise use the author's C11 default config
+        if [ -f "factory_boot/phone.config" ]; then
+          echo "✅ Found user-uploaded phone.config, using it..."
+          cp factory_boot/phone.config config/phone.config
+        else
+          echo "ℹ️ Using default config/phone.config from the repository."
+        fi
+
+        echo "====== 🔧 Injecting Droidspaces Requirements ======"
+        # Force enable necessary namespace and cgroup features for Droidspaces
+        sed -i 's/# CONFIG_USER_NS is not set/CONFIG_USER_NS=y/g' config/phone.config
+        echo "CONFIG_USER_NS=y" >> config/phone.config
+        echo "CONFIG_PID_NS=y" >> config/phone.config
+        echo "CONFIG_NET_NS=y" >> config/phone.config
+        echo "CONFIG_UTS_NS=y" >> config/phone.config
+        echo "CONFIG_IPC_NS=y" >> config/phone.config
+        echo "CONFIG_MEMCG=y" >> config/phone.config
+        echo "CONFIG_CGROUP_DEVICE=y" >> config/phone.config
+        echo "CONFIG_DEVTMPFS=y" >> config/phone.config
+
+    # ================== 4. Build Kernel ==================
+    - name: 4. Build Kernel
+      run: |
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+
+        if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
+          echo "====== 🔧 Integrating KernelSU v0.9.5 ======"
+          cd ${{ env.KERNEL_SOURCE_DIR }}
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          cd ${{ github.workspace }}
+          echo "CONFIG_KSU=y" >> config/phone.config
+          echo "CONFIG_KSU_DEBUG=n" >> config/phone.config
+        fi
+
+        echo "====== 🔧 Starting Compilation ======"
+        cp config/phone.config .config
+        chmod +x build_kernel.sh
+        ./build_kernel.sh
+
+        echo "====== ✅ Verifying Config ======"
+        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_SECCOMP" .config || echo "⚠️ Some configs missing"
+        if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
+          grep -q "CONFIG_KSU=y" .config && echo "✅ KernelSU integrated" || echo "❌ KernelSU failed"
+        fi
+
+        echo "====== 📁 Extracting Kernel Image ======"
+        mkdir -p ~/compiled_kernel
+        cp ./build/arch/arm64/boot/Image.gz ~/compiled_kernel/Image.gz || { echo "❌ Image.gz not found!"; exit 1; }
+        ls -lh ~/compiled_kernel/
+
+    # ================== 5. Pack Boot Image (with AVB & 96MB) ==================
+    - name: 5. Pack Boot Image
+      if: inputs.build_type == 'kernel_and_boot'
+      run: |
+        echo "====== 📦 Preparing Packing Tools ======"
+        cp tools/unpackbootimg ./unpackbootimg
+        cp tools/mkbootimg ./mkbootimg
+        chmod +x ./unpackbootimg ./mkbootimg
+        
+        # Download avbtool for signing
+        wget -q https://raw.githubusercontent.com/aosp-mirror/platform_external_avb/master/avbtool.py -O avbtool.py
+        chmod +x avbtool.py
+
+        echo "====== 🧐 Downloading Factory boot.img (C11) ======"
+        wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img" -O boot.img
+        if [ ! -s boot.img ]; then echo "❌ boot.img download failed!"; exit 1; fi
+
+        echo "====== 🔧 Unpacking and Replacing Kernel ======"
+        mkdir -p bootimg_out
+        ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ Unpack failed!"; exit 1; }
+        cp ~/compiled_kernel/Image.gz bootimg_out/boot.img-kernel
+
+        echo "====== 📦 Repacking Boot Image ======"
+        cd bootimg_out
+        CMDLINE=$(cat boot.img-cmdline); BASE=$(cat boot.img-base); PAGESIZE=$(cat boot.img-pagesize)
+        KERNEL_OFFSET=$(cat boot.img-kernel_offset); RAMDISK_OFFSET=$(cat boot.img-ramdisk_offset)
+        SECOND_OFFSET=$(cat boot.img-second_offset); TAGS_OFFSET=$(cat boot.img-tags_offset)
+        DTB_OFFSET=$(cat boot.img-dtb_offset); OS_VERSION=$(cat boot.img-os_version)
+        OS_PATCH_LEVEL=$(cat boot.img-os_patch_level); HEADER_VERSION=$(cat boot.img-header_version)
+
+        RAMDISK_ARG=""; if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"; elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"; fi
+        DTB_ARG=""; if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
+        SECOND_ARG=""; if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
+
+        ../mkbootimg --kernel boot.img-kernel $RAMDISK_ARG $SECOND_ARG $DTB_ARG \
+                  --cmdline "$CMDLINE" --base $BASE --pagesize $PAGESIZE \
+                  --kernel_offset $KERNEL_OFFSET --ramdisk_offset $RAMDISK_OFFSET \
+                  --second_offset $SECOND_OFFSET --tags_offset $TAGS_OFFSET \
+                  --dtb_offset $DTB_OFFSET --os_version $OS_VERSION \
+                  --os_patch_level $OS_PATCH_LEVEL --header_version $HEADER_VERSION \
+                  -o ../new-boot.img
+        cd ..
+
+        if [ ! -f "new-boot.img" ]; then echo "❌ Pack failed!"; exit 1; fi
+
+        echo "====== 🔐 Adding AVB Signature & 96MB Alignment ======"
+        # Generate temporary key for AVB signing
+        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out testkey.pem 2>/dev/null
+        
+        # 100663296 bytes = 96 MB
+        python3 avbtool.py add_hash_footer \
+          --image new-boot.img \
+          --partition_size 100663296 \
+          --partition_name boot \
+          --key testkey.pem \
+          --algorithm SHA256_RSA2048
+          
+        echo "✅ Boot image successfully signed and aligned to 96MB!"
+        ls -lh new-boot.img
+
+    # ================== 6. Prepare Artifacts ==================
+    - name: 6. Prepare Artifacts
+      if: always()
+      run: |
+        ROOT_CHOICE="${{ inputs.root_choice }}"
+        if [ "$ROOT_CHOICE" == "magisk" ]; then KIT_NAME="A32-Kit-Magisk"
+        elif [ "$ROOT_CHOICE" == "kernelsu" ]; then KIT_NAME="A32-Kit-KernelSU"
+        else KIT_NAME="A32-Kit-NoRoot"; fi
+
+        mkdir -p ~/final_release/boot ~/final_release/kernel ~/final_release/apk
+
+        # 1. Put Kernel
+        if [ -f ~/compiled_kernel/Image.gz ]; then cp ~/compiled_kernel/Image.gz ~/final_release/kernel/; fi
+        
+        # 2. Put Unpatched Boot Image (signed)
+        if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
+
+        # 3. Put APKs if requested
+        if [ "${{ inputs.include_apk }}" == "yes" ]; then
+          if [ "$ROOT_CHOICE" == "magisk" ]; then
+            wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Magisk.apk || true
+          elif [ "$ROOT_CHOICE" == "kernelsu" ]; then
+            wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/kernelsu-v0.9.5/KernelSU.apk" -O ~/final_release/apk/KernelSU.apk || true
+          fi
+          wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
+        fi
+
+        # 4. Generate README
+        echo "========================================================" > ~/final_release/README.txt
+        echo " OPPO A32 Linux Kit (C11)" >> ~/final_release/README.txt
+        echo "========================================================" >> ~/final_release/README.txt
+        echo "This kit is built for ColorOS 11 (Android 11)." >> ~/final_release/README.txt
+        echo "Build Type: ${{ inputs.build_type }}, Root: $ROOT_CHOICE" >> ~/final_release/README.txt
+        echo "" >> ~/final_release/README.txt
+        if [ "$ROOT_CHOICE" == "kernelsu" ]; then
+          echo "[Files] boot/boot-unpatched.img (Integrated with KernelSU), kernel/Image.gz, apk/KernelSU.apk" >> ~/final_release/README.txt
+          echo "[Steps] 1. Flash boot-unpatched.img via fastboot. 2. Install KernelSU.apk." >> ~/final_release/README.txt
+        elif [ "$ROOT_CHOICE" == "magisk" ]; then
+          echo "[Files] boot/boot-unpatched.img, kernel/Image.gz, apk/Magisk.apk" >> ~/final_release/README.txt
+          echo "[Steps] 1. Patch boot-unpatched.img with Magisk. 2. Flash patched image." >> ~/final_release/README.txt
+        else
+          echo "[Files] boot/boot-unpatched.img, kernel/Image.gz" >> ~/final_release/README.txt
+        fi
+        echo "Finally, install apk/Droidspaces.apk to run Linux!" >> ~/final_release/README.txt
+
+        cd ~/final_release
+        zip -r "${KIT_NAME}.zip" ./*
+        echo "====== ✅ Artifact built: ${KIT_NAME}.zip ======"
+
+    # ================== 7. Upload Artifact ==================
+    - name: 7. Upload Artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: A32-Kit
+        path: ~/final_release/*.zip
