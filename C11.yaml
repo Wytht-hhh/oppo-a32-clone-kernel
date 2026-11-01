@@ -49,16 +49,20 @@ jobs:
         sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget openssl
         sudo mkdir -p /lib/firmware
 
-    # ================== 3. Prepare Config (C11) ==================
+    # ================== 3. Prepare Config (Strictly C11) ==================
     - name: 3. Prepare Config File
       run: |
         echo "====== 🛠️ Preparing C11 Kernel Config ======"
-        # Use the user-uploaded config if exists, otherwise use the author's C11 default config
+        
+        # 清理可能的自定义 C12 配置，强制使用作者提供的 config
         if [ -f "factory_boot/phone.config" ]; then
-          echo "✅ Found user-uploaded phone.config, using it..."
-          cp factory_boot/phone.config config/phone.config
-        else
-          echo "ℹ️ Using default config/phone.config from the repository."
+           echo "⚠️ Found phone.config in factory_boot, but we will IGNORE it for C11."
+        fi
+
+        # 直接使用仓库根目录下原作者提供的 config/phone.config
+        if [ ! -f "config/phone.config" ]; then
+           echo "❌ Error: config/phone.config not found in repository!"
+           exit 1
         fi
 
         echo "====== 🔧 Injecting Droidspaces Requirements ======"
@@ -117,7 +121,8 @@ jobs:
         wget -q https://raw.githubusercontent.com/aosp-mirror/platform_external_avb/master/avbtool.py -O avbtool.py
         chmod +x avbtool.py
 
-        echo "====== 🧐 Downloading Factory boot.img (C11) ======"
+        echo "====== 🧐 Downloading Factory boot.img (Ensure it's C11) ======"
+        # Note: Please make sure the release tag is your C11 stock boot.img
         wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/c12--original-boot/boot.img" -O boot.img
         if [ ! -s boot.img ]; then echo "❌ boot.img download failed!"; exit 1; fi
 
