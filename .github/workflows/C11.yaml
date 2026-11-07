@@ -53,10 +53,9 @@ jobs:
     - name: 3. Prepare Config File
       run: |
         echo "====== 🛠️ Preparing C11 Kernel Config ======"
-        # 强制使用作者提供的 config/phone.config
         if [ ! -f "config/phone.config" ]; then
-           echo "❌ Error: config/phone.config not found in repository!"
-           exit 1
+          echo "❌ Error: config/phone.config not found in repository!"
+          exit 1
         fi
 
         echo "====== 🔧 Injecting Droidspaces Requirements ======"
@@ -109,8 +108,6 @@ jobs:
         # 如果 tools 目录不存在，直接下载通用工具
         if [ ! -f "tools/unpackbootimg" ]; then
           mkdir -p tools
-          wget -q https://raw.githubusercontent.com/TeamWin/android_device_qcom_twrp-common/master/prebuilt/Android.mk -O /dev/null || true
-          # 直接使用 mkbootimg 的 Python 版本或者下载通用版工具，如果原本没有的话
           wget -q https://github.com/osm0sis/Android-Image-Kitchen/raw/master/tools/linux/unpackbootimg -O tools/unpackbootimg
           wget -q https://github.com/osm0sis/Android-Image-Kitchen/raw/master/tools/linux/mkbootimg -O tools/mkbootimg
           chmod +x tools/unpackbootimg tools/mkbootimg
@@ -119,13 +116,10 @@ jobs:
         cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
 
-        echo "====== 🧐 Copying Factory boot.img (Make sure it exists in factory_boot) ======"
-        # 直接从你上传的 factory_boot 文件夹读取 C11 的原厂 boot.img
-        if [ ! -f "factory_boot/boot.img" ]; then
-          echo "❌ Error: factory_boot/boot.img not found! Please upload C11 boot.img into factory_boot folder."
-          exit 1
-        fi
-        cp factory_boot/boot.img ./boot.img
+        echo "====== 🧐 Downloading C11 Factory boot.img from Release ======"
+        # 从你刚刚建立的 Release 下载
+        wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/c11--original-boot/boot.img" -O boot.img
+        if [ ! -s boot.img ]; then echo "❌ boot.img download failed! Check your release tag 'c11--original-boot'"; exit 1; fi
 
         echo "====== 🔧 Unpacking and Replacing Kernel ======"
         mkdir -p bootimg_out
@@ -154,7 +148,7 @@ jobs:
         cd ..
 
         if [ ! -f "new-boot.img" ]; then echo "❌ Pack failed!"; exit 1; fi
-        echo "✅ Boot image packed successfully (No AVB Signature needed)!"
+        echo "✅ Boot image packed successfully!"
         ls -lh new-boot.img
 
     # ================== 6. Prepare Artifacts ==================
@@ -193,7 +187,6 @@ jobs:
         echo "" >> ~/final_release/README.txt
         echo "[Steps] 1. Flash boot-unpatched.img via fastboot. 2. Install related APKs." >> ~/final_release/README.txt
         echo "Note: Make sure to disable AVB by flashing vbmeta first!" >> ~/final_release/README.txt
-        echo "Finally, install apk/Droidspaces.apk to run Linux!" >> ~/final_release/README.txt
 
         cd ~/final_release
         zip -r "${KIT_NAME}.zip" ./*
