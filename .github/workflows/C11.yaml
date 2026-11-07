@@ -9,17 +9,17 @@ on:
         default: 'kernel_and_boot'
         type: choice
         options:
-          - kernel_only
-          - kernel_and_boot
+          - kernel_only       # Only compile kernel
+          - kernel_and_boot   # Compile and pack boot.img
       root_choice:
         description: 'Select Root solution'
         required: true
         default: 'kernelsu'
         type: choice
         options:
-          - kernelsu
-          - magisk
-          - none
+          - kernelsu          # Integrate KernelSU into kernel
+          - magisk            # Normal kernel (use Magisk later)
+          - none              # No root
       include_apk:
         description: 'Include APK tools (Droidspaces etc.)'
         required: true
@@ -38,26 +38,28 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+    # ================== 1. Checkout Code ==================
     - name: 1. Checkout Code
       uses: actions/checkout@v4
 
+    # ================== 2. Install Dependencies ==================
     - name: 2. Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget openssl
+        sudo apt-get install -y gcc-aarch64-linux-gnu build-essential bc bison flex libssl-dev zip curl python3 device-tree-compiler libtinfo5 unzip cpio gzip wget
         sudo mkdir -p /lib/firmware
 
+    # ================== 3. Prepare Config (Strictly C11) ==================
     - name: 3. Prepare Config File
       run: |
-        echo "====== Preparing C11 Kernel Config ======"
-        if [ -f "factory_boot/phone.config" ]; then
-          echo "⚠️ Found phone.config in factory_boot, but we will IGNORE it for C11."
-        fi
+        echo "====== 🛠️ Preparing C11 Kernel Config ======"
+        # 强制使用作者提供的 config/phone.config
         if [ ! -f "config/phone.config" ]; then
-          echo "❌ Error: config/phone.config not found in repository!"
-          exit 1
+           echo "❌ Error: config/phone.config not found in repository!"
+           exit 1
         fi
-        echo "====== Injecting Droidspaces Requirements ======"
+
+        echo "====== 🔧 Injecting Droidspaces Requirements ======"
         sed -i 's/# CONFIG_USER_NS is not set/CONFIG_USER_NS=y/g' config/phone.config
         echo "CONFIG_USER_NS=y" >> config/phone.config
         echo "CONFIG_PID_NS=y" >> config/phone.config
@@ -68,52 +70,69 @@ jobs:
         echo "CONFIG_CGROUP_DEVICE=y" >> config/phone.config
         echo "CONFIG_DEVTMPFS=y" >> config/phone.config
 
+    # ================== 4. Build Kernel ==================
     - name: 4. Build Kernel
       run: |
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
+
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
-          echo "====== Integrating KernelSU v0.9.5 ======"
+          echo "====== 🔧 Integrating KernelSU v0.9.5 ======"
           cd ${{ env.KERNEL_SOURCE_DIR }}
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
           cd ${{ github.workspace }}
           echo "CONFIG_KSU=y" >> config/phone.config
           echo "CONFIG_KSU_DEBUG=n" >> config/phone.config
         fi
-        echo "====== Starting Compilation ======"
+
+        echo "====== 🔧 Starting Compilation ======"
         cp config/phone.config .config
         chmod +x build_kernel.sh
         ./build_kernel.sh
-        echo "====== Verifying Config ======"
-        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS|CONFIG_SECCOMP" .config || echo "⚠️ Some configs missing"
+
+        echo "====== ✅ Verifying Config ======"
+        grep -E "CONFIG_USER_NS|CONFIG_NAMESPACES|CONFIG_CGROUPS" .config || echo "⚠️ Some configs missing"
         if [ "${{ inputs.root_choice }}" == "kernelsu" ]; then
           grep -q "CONFIG_KSU=y" .config && echo "✅ KernelSU integrated" || echo "❌ KernelSU failed"
         fi
-        echo "====== Extracting Kernel Image ======"
+
+        echo "====== 📁 Extracting Kernel Image ======"
         mkdir -p ~/compiled_kernel
         cp ./build/arch/arm64/boot/Image.gz ~/compiled_kernel/Image.gz || { echo "❌ Image.gz not found!"; exit 1; }
+        ls -lh ~/compiled_kernel/
 
-    - name: 5. Pack Boot Image (with AVB & 96MB)
+    # ================== 5. Pack Boot Image ==================
+    - name: 5. Pack Boot Image
       if: inputs.build_type == 'kernel_and_boot'
       run: |
-        echo "====== Preparing Packing Tools ======"
+        echo "====== 📦 Preparing Packing Tools ======"
+        # 如果 tools 目录不存在，直接下载通用工具
+        if [ ! -f "tools/unpackbootimg" ]; then
+          mkdir -p tools
+          wget -q https://raw.githubusercontent.com/TeamWin/android_device_qcom_twrp-common/master/prebuilt/Android.mk -O /dev/null || true
+          # 直接使用 mkbootimg 的 Python 版本或者下载通用版工具，如果原本没有的话
+          wget -q https://github.com/osm0sis/Android-Image-Kitchen/raw/master/tools/linux/unpackbootimg -O tools/unpackbootimg
+          wget -q https://github.com/osm0sis/Android-Image-Kitchen/raw/master/tools/linux/mkbootimg -O tools/mkbootimg
+          chmod +x tools/unpackbootimg tools/mkbootimg
+        fi
         cp tools/unpackbootimg ./unpackbootimg
         cp tools/mkbootimg ./mkbootimg
         chmod +x ./unpackbootimg ./mkbootimg
-        wget -q https://raw.githubusercontent.com/aosp-mirror/platform_external_avb/master/avbtool.py -O avbtool.py
-        chmod +x avbtool.py
 
-        echo "====== Downloading Factory boot.img (Ensure it's C11) ======"
-        # ⚠️ 确保下面这个 Release 标签 'c11--original-boot' 对应的确实是 C11 的 boot.img
-        wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/c11--original-boot/boot.img" -O boot.img
-        if [ ! -s boot.img ]; then echo "❌ boot.img download failed!"; exit 1; fi
+        echo "====== 🧐 Copying Factory boot.img (Make sure it exists in factory_boot) ======"
+        # 直接从你上传的 factory_boot 文件夹读取 C11 的原厂 boot.img
+        if [ ! -f "factory_boot/boot.img" ]; then
+          echo "❌ Error: factory_boot/boot.img not found! Please upload C11 boot.img into factory_boot folder."
+          exit 1
+        fi
+        cp factory_boot/boot.img ./boot.img
 
-        echo "====== Unpacking and Replacing Kernel ======"
+        echo "====== 🔧 Unpacking and Replacing Kernel ======"
         mkdir -p bootimg_out
         ./unpackbootimg -i boot.img -o bootimg_out || { echo "❌ Unpack failed!"; exit 1; }
         cp ~/compiled_kernel/Image.gz bootimg_out/boot.img-kernel
 
-        echo "====== Repacking Boot Image ======"
+        echo "====== 📦 Repacking Boot Image ======"
         cd bootimg_out
         CMDLINE=$(cat boot.img-cmdline); BASE=$(cat boot.img-base); PAGESIZE=$(cat boot.img-pagesize)
         KERNEL_OFFSET=$(cat boot.img-kernel_offset); RAMDISK_OFFSET=$(cat boot.img-ramdisk_offset)
@@ -121,36 +140,24 @@ jobs:
         DTB_OFFSET=$(cat boot.img-dtb_offset); OS_VERSION=$(cat boot.img-os_version)
         OS_PATCH_LEVEL=$(cat boot.img-os_patch_level); HEADER_VERSION=$(cat boot.img-header_version)
 
-        RAMDISK_ARG=""
-        if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"
-        elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"
-        fi
-        DTB_ARG=""
-        if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
-        SECOND_ARG=""
-        if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
+        RAMDISK_ARG=""; if [ -f "boot.img-ramdisk.gz" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk.gz"; elif [ -f "boot.img-ramdisk" ]; then RAMDISK_ARG="--ramdisk boot.img-ramdisk"; fi
+        DTB_ARG=""; if [ -f "boot.img-dtb" ]; then DTB_ARG="--dtb boot.img-dtb"; fi
+        SECOND_ARG=""; if [ -f "boot.img-second" ]; then SECOND_ARG="--second boot.img-second"; fi
 
         ../mkbootimg --kernel boot.img-kernel $RAMDISK_ARG $SECOND_ARG $DTB_ARG \
-          --cmdline "$CMDLINE" --base $BASE --pagesize $PAGESIZE \
-          --kernel_offset $KERNEL_OFFSET --ramdisk_offset $RAMDISK_OFFSET \
-          --second_offset $SECOND_OFFSET --tags_offset $TAGS_OFFSET \
-          --dtb_offset $DTB_OFFSET --os_version $OS_VERSION \
-          --os_patch_level $OS_PATCH_LEVEL --header_version $HEADER_VERSION \
-          -o ../new-boot.img
+                  --cmdline "$CMDLINE" --base $BASE --pagesize $PAGESIZE \
+                  --kernel_offset $KERNEL_OFFSET --ramdisk_offset $RAMDISK_OFFSET \
+                  --second_offset $SECOND_OFFSET --tags_offset $TAGS_OFFSET \
+                  --dtb_offset $DTB_OFFSET --os_version $OS_VERSION \
+                  --os_patch_level $OS_PATCH_LEVEL --header_version $HEADER_VERSION \
+                  -o ../new-boot.img
         cd ..
 
         if [ ! -f "new-boot.img" ]; then echo "❌ Pack failed!"; exit 1; fi
+        echo "✅ Boot image packed successfully (No AVB Signature needed)!"
+        ls -lh new-boot.img
 
-        echo "====== Adding AVB Signature & 96MB Alignment ======"
-        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out testkey.pem 2>/dev/null
-        python3 avbtool.py add_hash_footer \
-          --image new-boot.img \
-          --partition_size 100663296 \
-          --partition_name boot \
-          --key testkey.pem \
-          --algorithm SHA256_RSA2048
-        echo "✅ Boot image successfully signed and aligned to 96MB!"
-
+    # ================== 6. Prepare Artifacts ==================
     - name: 6. Prepare Artifacts
       if: always()
       run: |
@@ -158,9 +165,16 @@ jobs:
         if [ "$ROOT_CHOICE" == "magisk" ]; then KIT_NAME="A32-Kit-Magisk"
         elif [ "$ROOT_CHOICE" == "kernelsu" ]; then KIT_NAME="A32-Kit-KernelSU"
         else KIT_NAME="A32-Kit-NoRoot"; fi
+
         mkdir -p ~/final_release/boot ~/final_release/kernel ~/final_release/apk
+
+        # 1. Put Kernel
         if [ -f ~/compiled_kernel/Image.gz ]; then cp ~/compiled_kernel/Image.gz ~/final_release/kernel/; fi
+        
+        # 2. Put Unpatched Boot Image
         if [ -f new-boot.img ]; then cp new-boot.img ~/final_release/boot/boot-unpatched.img; fi
+
+        # 3. Put APKs if requested
         if [ "${{ inputs.include_apk }}" == "yes" ]; then
           if [ "$ROOT_CHOICE" == "magisk" ]; then
             wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/magisk-v31.0/Alpha_v31000.apk" -O ~/final_release/apk/Magisk.apk || true
@@ -169,13 +183,23 @@ jobs:
           fi
           wget -q "https://github.com/${{ env.GITHUB_REPO }}/releases/download/droidspaces-v6.6.0/Droidspaces-universal-v6.6.0-cff50fa.apk" -O ~/final_release/apk/Droidspaces.apk || true
         fi
+
+        # 4. Generate README
         echo "========================================================" > ~/final_release/README.txt
         echo " OPPO A32 Linux Kit (C11)" >> ~/final_release/README.txt
         echo "========================================================" >> ~/final_release/README.txt
         echo "This kit is built for ColorOS 11 (Android 11)." >> ~/final_release/README.txt
+        echo "Build Type: ${{ inputs.build_type }}, Root: $ROOT_CHOICE" >> ~/final_release/README.txt
+        echo "" >> ~/final_release/README.txt
+        echo "[Steps] 1. Flash boot-unpatched.img via fastboot. 2. Install related APKs." >> ~/final_release/README.txt
+        echo "Note: Make sure to disable AVB by flashing vbmeta first!" >> ~/final_release/README.txt
+        echo "Finally, install apk/Droidspaces.apk to run Linux!" >> ~/final_release/README.txt
+
         cd ~/final_release
         zip -r "${KIT_NAME}.zip" ./*
+        echo "====== ✅ Artifact built: ${KIT_NAME}.zip ======"
 
+    # ================== 7. Upload Artifact ==================
     - name: 7. Upload Artifact
       if: always()
       uses: actions/upload-artifact@v4
